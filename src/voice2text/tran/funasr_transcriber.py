@@ -552,7 +552,13 @@ class FunASRTranscriber:
             print("\n您可以使用 rename_voice_print 方法为这些自动注册的声纹分配人名。")
             print("例如: transcriber.rename_voice_print('" + list(auto_registered_speakers.keys())[0] + "', '新人名')")
 
-        return transcript, auto_registered_speakers, audio_duration  # 现在返回三个值
+        # return transcript, auto_registered_speakers, audio_duration, output_file  # 现在返回三个值
+        return {
+            "transcript": transcript,
+            "auto_registered_speakers": auto_registered_speakers,
+            "audio_duration": audio_duration,
+            "output_file": output_file
+        }
     def _merge_same_speaker_segments(self, segments, max_gap_ms=3000):
         """合并相同说话人的短片段，用于提高声纹识别准确性
 

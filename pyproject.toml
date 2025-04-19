@@ -7,10 +7,6 @@ version = "0.1.0"
 description = "A sample Python project"
 readme = "README.md"
 requires-python = ">=3.11"
-#license = {text = "MIT"}
-#authors = [
-#{name = "", email = "your.email@example.com"},
-#]
 dependencies = [
     "addict==2.4.0",
     "fastapi",
@@ -39,4 +35,4 @@ target-version = "py310"
 dev = [
 ]
 [tool.hatch.build.targets.wheel]
-packages = ["src/core_pak"]
+packages = ["src/voice2text"]
