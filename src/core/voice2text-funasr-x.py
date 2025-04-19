@@ -1,5 +1,8 @@
 import os
 import pickle
+import re
+from datetime import datetime, timedelta
+
 import numpy as np
 import pandas as pd
 import librosa
@@ -386,9 +389,58 @@ class FunASRTranscriber:
         else:
             self.voice_print_manager = voice_print_manager
 
+    def _parse_filename(self, filename):
+        """解析文件名，提取地点和时间信息"""
+        # 移除扩展名
+        basename = os.path.basename(filename)
+        name_without_ext = os.path.splitext(basename)[0]
+
+        # 使用正则表达式匹配"地点_时间_名称"格式
+        match = re.match(r'^(.+?)_(\d{8}_\d{6})_(.+)$', name_without_ext)
+        if not match:
+            return None, None, None
+
+        location = match.group(1)
+        time_str = match.group(2)
+        name = match.group(3)
+
+        # 解析时间
+        try:
+            time_obj = datetime.strptime(time_str, "%Y%m%d_%H%M%S")
+            date_str = time_obj.strftime("%Y/%m/%d")
+            time_only_str = time_obj.strftime("%H:%M:%S")
+            return location, date_str, time_only_str
+        except ValueError:
+            return location, None, None
+
+    def _format_output_segment(self, start_time, end_time, speaker_name, text, file_location, file_date, file_time):
+        """格式化输出段落，包含地点和时间信息"""
+        # 解析原始时间戳
+        start_sec = self._parse_time(start_time)
+        end_sec = self._parse_time(end_time)
+
+        # 计算相对于文件时间的偏移
+        file_datetime = datetime.strptime(f"{file_date} {file_time}", "%Y/%m/%d %H:%M:%S")
+        start_datetime = file_datetime + timedelta(seconds=start_sec)
+        end_datetime = file_datetime + timedelta(seconds=end_sec)
+
+        # 格式化新时间戳
+        new_start_time = start_datetime.strftime("%Y/%m/%d-%H:%M:%S")
+        new_end_time = end_datetime.strftime("%Y/%m/%d-%H:%M:%S")
+
+        return f"[{file_location}][{new_start_time}-{new_end_time}] [{speaker_name}] {text}"
+
     def transcribe_file(self, audio_file_path, batch_size_s=300, hotword='', threshold=0.4, auto_register_unknown=True):
         """转写音频文件并进行说话人识别，可选自动注册未知说话人"""
         print(f"转写音频文件: {audio_file_path}...")
+
+        # 从文件名中提取地点和时间信息
+        file_location, file_date, file_time = self._parse_filename(audio_file_path)
+        if not file_location or not file_date or not file_time:
+            print("警告: 文件名不符合'地点_时间_名称.mp3'格式，将使用默认时间戳格式")
+            use_filename_info = False
+        else:
+            use_filename_info = True
 
         # 1. 使用FunASR进行转写和说话人分离
         print("步骤1: 使用FunASR进行转写(包含说话人分离)...")
@@ -411,7 +463,18 @@ class FunASRTranscriber:
             timestamps = result[0].get('timestamp', [])
 
             # 创建单一说话人的转写结果
-            transcript = f"[00:00:00-{self._format_time(len(full_text) / 10)}] [未知说话人] {full_text}"
+            if use_filename_info:
+                transcript = self._format_output_segment(
+                    "00:00:00",
+                    self._format_time(len(full_text) / 10),
+                    "未知说话人",
+                    full_text,
+                    file_location,
+                    file_date,
+                    file_time
+                )
+            else:
+                transcript = f"[00:00:00-{self._format_time(len(full_text) / 10)}] [未知说话人] {full_text}"
 
         else:
             # 2. 从sentence_info中提取说话人分段信息
@@ -458,7 +521,20 @@ class FunASRTranscriber:
                 speaker_name = speaker_mapping.get(spk_id, f"Speaker_{spk_id}")
 
                 # 添加格式化的片段
-                speaker_segments_formatted.append(f"[{start_time}-{end_time}] [{speaker_name}] {text}")
+                if use_filename_info:
+                    formatted_segment = self._format_output_segment(
+                        start_time,
+                        end_time,
+                        speaker_name,
+                        text,
+                        file_location,
+                        file_date,
+                        file_time
+                    )
+                else:
+                    formatted_segment = f"[{start_time}-{end_time}] [{speaker_name}] {text}"
+
+                speaker_segments_formatted.append(formatted_segment)
 
             # 将片段连接成单个字符串
             transcript = "\n".join(speaker_segments_formatted)
@@ -480,7 +556,6 @@ class FunASRTranscriber:
             print("例如: transcriber.rename_voice_print('" + list(auto_registered_speakers.keys())[0] + "', '新人名')")
 
         return transcript, auto_registered_speakers
-
     def _merge_same_speaker_segments(self, segments, max_gap_ms=3000):
         """合并相同说话人的短片段，用于提高声纹识别准确性
 
@@ -608,7 +683,7 @@ class FunASRTranscriber:
 def main():
     """主函数，演示使用方法"""
     # 配置
-    audio_file = "data/家有儿女吃饭.mp3"
+    audio_file = "data/刘星家_20231212_122300_家有儿女吃饭.mp3"
     device = "cpu"  # 如果有GPU可用，改为"cuda"
 
     # 创建转写器
