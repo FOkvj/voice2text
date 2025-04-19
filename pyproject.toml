@@ -13,7 +13,10 @@ requires-python = ">=3.11"
 #]
 dependencies = [
     "addict==2.4.0",
+    "fastapi",
+    "python-multipart",
     "flask==2.0.1",
+    "uvicorn",
     "gunicorn==20.1.0",
     "werkzeug==2.0.1",
     "requests==2.28.1",
