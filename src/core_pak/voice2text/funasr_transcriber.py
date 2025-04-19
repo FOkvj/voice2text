@@ -98,7 +98,7 @@ class VoicePrintManager:
     def __init__(self, speaker_encoder, voice_prints_path=DEFAULT_VOICE_PRINTS_PATH):
         self.speaker_encoder = speaker_encoder
         self.voice_prints_path = voice_prints_path
-        self.voice_prints, self.unnamed_voice_prints = self._load_voice_prints()
+        self.voice_prints, self.unnamed_voice_prints = self._load_voice_prints() or ({}, {})
 
 
     def _load_voice_prints(self):
@@ -106,7 +106,7 @@ class VoicePrintManager:
         if os.path.exists(self.voice_prints_path):
             with open(self.voice_prints_path, 'rb') as f:
                 return pickle.load(f)
-        return {}
+        return None
 
     def clear_voice_prints(self):
         """清空所有已注册的声纹"""
@@ -283,6 +283,7 @@ class VoicePrintManager:
                         is_unnamed = False
 
                 # 再检查未命名声纹
+                # if self.unnamed_voice_prints:
                 for speaker_id, unnamed_embedding in self.unnamed_voice_prints.items():
                     # 计算余弦相似度
                     similarity = self._cosine_similarity(embedding, unnamed_embedding)
@@ -697,7 +698,7 @@ def main():
     )
 
     # transcriber.clear_voice_prints()
-    transcriber.rename_voice_print("Speaker_b9012ed2", "刘星")
+    # transcriber.rename_voice_print("Speaker_b9012ed2", "刘星")
     # 列出注册声纹
     transcriber.list_registered_voices()
 
@@ -705,7 +706,7 @@ def main():
     # transcriber.register_voices_from_directory("~/Desktop/voice2text/src/data/sample")
 
     # 转写音频文件，启用自动注册未知声纹
-    transcript, auto_registered = transcriber.transcribe_file(audio_file, threshold=0.5, auto_register_unknown=True)
+    transcript, auto_registered, duration = transcriber.transcribe_file(audio_file, threshold=0.5, auto_register_unknown=True)
 
     # 打印结果
     print("Transcription with Timestamps and Speaker Identification:")

@@ -39,4 +39,4 @@ target-version = "py310"
 dev = [
 ]
 [tool.hatch.build.targets.wheel]
-packages = ["src/app"]
+packages = ["src/core_pak"]
