@@ -534,7 +534,7 @@ class FunASRTranscriber:
                 speaker_segments_formatted.append(formatted_segment)
 
             # 将片段连接成单个字符串
-            transcript = "\n".join(speaker_segments_formatted)
+            transcript = " \n ".join(speaker_segments_formatted)
 
         # 保存输出到文件
         output_file = audio_file_path.rsplit(".", 1)[0] + "_transcript.txt"

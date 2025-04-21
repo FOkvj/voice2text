@@ -10,8 +10,8 @@ import torch
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
-from core_pak.api.schema import TranscriptionResult, ErrorResponse, VoicePrintInfo
-from core_pak.voice2text.funasr_transcriber import FunASRTranscriber
+from src.voice2text.api.schema import TranscriptionResult, ErrorResponse
+from src.voice2text.tran.funasr_transcriber import FunASRTranscriber
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -189,6 +189,7 @@ def list_voice_prints(include_unnamed: bool = True):
 # 其他API端点类似实现...
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8765)
+    # import uvicorn
+    #
+    # uvicorn.run(app, host="0.0.0.0", port=8765)
+    print(parse_filename("asdfs_会议室_20211001_122300_吃饭.mp3"))
