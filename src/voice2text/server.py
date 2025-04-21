@@ -49,18 +49,7 @@ app.add_middleware(
 
 # 初始化转写器 (实际项目中应该使用依赖注入)
 # 初始化转写器
-transcriber = FunASRTranscriber(
-        device="cuda" if torch.cuda.is_available() else "cpu",
-        voice_prints_path=os.path.join(os.path.expanduser("~"), ".cache", "voice_prints_ecapa.pkl"),
-        funasr_model="paraformer-zh",
-        funasr_model_revision="v2.0.4",
-        vad_model="fsmn-vad",
-        vad_model_revision="v2.0.4",
-        punc_model="ct-punc",
-        punc_model_revision="v2.0.4",
-        spk_model="cam++",
-        spk_model_revision="v2.0.2"
-    )
+
 
 # 临时文件存储目录
 UPLOAD_DIR = "uploads"
@@ -189,7 +178,19 @@ def list_voice_prints(include_unnamed: bool = True):
 # 其他API端点类似实现...
 
 if __name__ == "__main__":
-    # import uvicorn
-    #
-    # uvicorn.run(app, host="0.0.0.0", port=8765)
-    print(parse_filename("asdfs_会议室_20211001_122300_吃饭.mp3"))
+    import uvicorn
+
+    transcriber = FunASRTranscriber(
+        device="cuda" if torch.cuda.is_available() else "cpu",
+        voice_prints_path=os.path.join(os.path.expanduser("~"), ".cache", "voice_prints_ecapa.pkl"),
+        funasr_model="paraformer-zh",
+        funasr_model_revision="v2.0.4",
+        vad_model="fsmn-vad",
+        vad_model_revision="v2.0.4",
+        punc_model="ct-punc",
+        punc_model_revision="v2.0.4",
+        spk_model="cam++",
+        spk_model_revision="v2.0.2"
+    )
+
+    uvicorn.run(app, host="0.0.0.0", port=8765)
