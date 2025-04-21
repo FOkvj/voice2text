@@ -10,8 +10,8 @@ import torch
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.voice2text.api.schema import TranscriptionResult, ErrorResponse
-from src.voice2text.tran.funasr_transcriber import FunASRTranscriber
+from api.schema import TranscriptionResult, ErrorResponse
+from tran.funasr_transcriber import FunASRTranscriber
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
