@@ -1,18 +1,16 @@
 import os
-import pickle
-import re
 from datetime import datetime, timedelta
 
-import numpy as np
-import pandas as pd
 import librosa
-import torch
-import uuid
+import pandas as pd
 from funasr import AutoModel
 from speechbrain.inference import EncoderClassifier
 
+from src.voice2text.tran.voiceprint_manager import VoicePrintManager
+
 # 默认路径常量
-DEFAULT_VOICE_PRINTS_PATH = os.path.join(os.path.expanduser("~"), ".cache", "voice_prints_ecapa.pkl")
+DEFAULT_VOICE_PRINTS_PATH = os.path.join(os.path.expanduser("~"), ".cache")
+DEFAULT_VOICEPRINT_MAX_LENGTH = 30  # 默认声纹最大长度（秒）
 
 
 class AudioProcessor:
@@ -23,6 +21,25 @@ class AudioProcessor:
         """处理音频文件并返回适合提取声纹的音频数据"""
         wav, sr = librosa.load(audio_path, sr=target_sr, mono=True)
         return wav, sr
+
+    @staticmethod
+    def save_audio_segment(wav_data, output_path, sr=16000):
+        """将音频片段保存为文件"""
+        sf.write(output_path, wav_data, sr)
+        return output_path
+
+    @staticmethod
+    def trim_audio(wav_data, sr, max_length_sec):
+        """将音频修剪到指定的最大长度"""
+        max_samples = int(max_length_sec * sr)
+        if len(wav_data) > max_samples:
+            # 从中间截取，以获得更好的声纹质量
+            mid_point = len(wav_data) // 2
+            half_length = max_samples // 2
+            start_idx = max(0, mid_point - half_length)
+            end_idx = min(len(wav_data), mid_point + half_length)
+            return wav_data[start_idx:end_idx]
+        return wav_data
 
 
 class ModelManager:
@@ -92,256 +109,8 @@ class ModelManager:
             raise
 
 
-class VoicePrintManager:
-    """管理声纹注册和识别"""
-
-    def __init__(self, speaker_encoder, voice_prints_path=DEFAULT_VOICE_PRINTS_PATH):
-        self.speaker_encoder = speaker_encoder
-        self.voice_prints_path = voice_prints_path
-        self.voice_prints, self.unnamed_voice_prints = self._load_voice_prints() or ({}, {})
-
-
-    def _load_voice_prints(self):
-        """加载已有声纹或创建空字典"""
-        if os.path.exists(self.voice_prints_path):
-            with open(self.voice_prints_path, 'rb') as f:
-                return pickle.load(f)
-        return None
-
-    def clear_voice_prints(self):
-        """清空所有已注册的声纹"""
-        old_count = len(self.voice_prints) + len(self.unnamed_voice_prints)
-        self.voice_prints = {}
-        self.unnamed_voice_prints = {}
-        self.save_voice_prints()
-        print(f"已清空 {old_count} 个声纹缓存。")
-
-    def save_voice_prints(self):
-        """保存当前声纹到磁盘"""
-        # 确保目录存在
-        os.makedirs(os.path.dirname(self.voice_prints_path), exist_ok=True)
-        # 保存命名和未命名的声纹
-        with open(self.voice_prints_path, 'wb') as f:
-            pickle.dump((self.voice_prints, self.unnamed_voice_prints), f)
-
-    def register_voice(self, person_name, audio_file_path):
-        """从音频文件注册新声纹"""
-        print(f"Registering voice for: {person_name} from audio file")
-
-        # 处理音频文件
-        wav, sr = AudioProcessor.process_audio(audio_file_path)
-
-        # 转换为tensor
-        wav_tensor = torch.FloatTensor(wav).unsqueeze(0)
-
-        # 提取声纹嵌入向量
-        with torch.no_grad():
-            embedding = self.speaker_encoder.encode_batch(wav_tensor)
-            embedding = embedding.squeeze().cpu().numpy()
-
-        # 添加到声纹集合
-        self.voice_prints[person_name] = embedding
-        self.save_voice_prints()
-
-        print(f"Voice print for {person_name} registered successfully.")
-        return self.voice_prints
-
-    def register_voice_from_embedding(self, embedding, audio_data=None):
-        """从嵌入向量注册未命名声纹，返回唯一ID"""
-        # 生成唯一ID
-        speaker_id = f"Speaker_{uuid.uuid4().hex[:8]}"
-
-        # 保存嵌入向量
-        self.unnamed_voice_prints[speaker_id] = embedding
-        self.save_voice_prints()
-
-        print(f"New voice print registered with ID: {speaker_id}")
-        return speaker_id
-
-    def rename_voice_print(self, speaker_id, new_name):
-        """重命名声纹ID为人名"""
-        if speaker_id in self.unnamed_voice_prints:
-            # 获取嵌入向量
-            embedding = self.unnamed_voice_prints[speaker_id]
-
-            # 添加到命名声纹
-            self.voice_prints[new_name] = embedding
-
-            # 从未命名声纹中删除
-            del self.unnamed_voice_prints[speaker_id]
-
-            # 保存更改
-            self.save_voice_prints()
-            print(f"Voice print {speaker_id} renamed to {new_name}")
-            return True
-        else:
-            print(f"Voice print with ID {speaker_id} not found")
-            return False
-
-    def register_voices_from_directory(self, directory_path):
-        """从目录中所有音频文件注册声纹
-        文件名(不包括扩展名)用作说话人名称。
-        支持mp3、wav、m4a和其他常见音频格式。
-        """
-        directory_path = os.path.expanduser(directory_path)
-        print(f"Registering voice prints from directory: {directory_path}")
-        if not os.path.isdir(directory_path):
-            print(f"Error: {directory_path} is not a valid directory")
-            return self.voice_prints
-
-        # 支持的音频扩展名列表
-        audio_extensions = ['.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac']
-        registered_count = 0
-
-        # 处理目录中的每个音频文件
-        for filename in os.listdir(directory_path):
-            file_path = os.path.join(directory_path, filename)
-
-            # 跳过目录和非音频文件
-            if os.path.isdir(file_path):
-                continue
-
-            _, ext = os.path.splitext(filename)
-            if ext.lower() not in audio_extensions:
-                continue
-
-            # 使用不带扩展名的文件名作为说话人名称
-            speaker_name = os.path.splitext(filename)[0]
-
-            try:
-                # 注册声纹
-                self.register_voice(speaker_name, file_path)
-                registered_count += 1
-            except Exception as e:
-                print(f"Error registering {speaker_name}: {e}")
-
-        print(f"Successfully registered {registered_count} voice prints from directory")
-        return self.voice_prints
-
-    def identify_speakers(self, diarize_segments, audio_file_path, threshold=0.3, auto_register=True):
-        """基于注册声纹识别说话人，可选自动注册未知声纹"""
-        print("基于已注册声纹识别说话人...")
-
-        # 处理音频文件
-        wav, sr = AudioProcessor.process_audio(audio_file_path)
-
-        # 存储说话人身份的字典
-        speaker_identities = {}
-        # 用于存储自动注册的未知声纹信息
-        auto_registered_speakers = {}
-
-        # 处理每个唯一的说话人
-        for speaker in diarize_segments['speaker'].unique():
-            # 获取该说话人的所有片段
-            speaker_segments = diarize_segments[diarize_segments['speaker'] == speaker]
-
-            print(f"处理说话人 {speaker}, 共 {len(speaker_segments)} 个片段")
-
-            # 收集该说话人的所有音频片段
-            speaker_wavs = []
-
-            for _, segment in speaker_segments.iterrows():
-                start = segment['start']
-                end = segment['end']
-
-                # 提取时间片段
-                start_sample = int(start * sr)
-                end_sample = min(int(end * sr), len(wav))
-
-                if end_sample > start_sample:
-                    segment_audio = wav[start_sample:end_sample]
-                    speaker_wavs.append(segment_audio)
-
-            if speaker_wavs:
-                # 合并所有片段以获得更好的声纹
-                combined_wav = np.concatenate(speaker_wavs)
-
-                print(f"说话人 {speaker} 的合并音频长度: {len(combined_wav) / sr:.2f}秒")
-
-                # 转换为tensor
-                wav_tensor = torch.FloatTensor(combined_wav).unsqueeze(0)
-
-                # 提取嵌入向量
-                with torch.no_grad():
-                    embedding = self.speaker_encoder.encode_batch(wav_tensor)
-                    embedding = embedding.squeeze().cpu().numpy()
-
-                # 与注册声纹和未命名声纹比较
-                best_match = None
-                best_score = 0
-                is_unnamed = False
-
-                # 先检查命名声纹
-                for person_name, registered_embedding in self.voice_prints.items():
-                    # 计算余弦相似度
-                    similarity = self._cosine_similarity(embedding, registered_embedding)
-                    print(f"与 {person_name} 的相似度: {similarity:.4f}")
-
-                    if similarity > best_score:
-                        best_score = similarity
-                        best_match = person_name
-                        is_unnamed = False
-
-                # 再检查未命名声纹
-                # if self.unnamed_voice_prints:
-                for speaker_id, unnamed_embedding in self.unnamed_voice_prints.items():
-                    # 计算余弦相似度
-                    similarity = self._cosine_similarity(embedding, unnamed_embedding)
-                    print(f"与 {speaker_id} 的相似度: {similarity:.4f}")
-
-                    if similarity > best_score:
-                        best_score = similarity
-                        best_match = speaker_id
-                        is_unnamed = True
-
-                # 分配身份（如果相似度高于阈值）
-                if best_score >= threshold:
-                    speaker_identities[speaker] = best_match
-                    print(
-                        f"说话人 {speaker} 被识别为: {best_match} (相似度: {best_score:.4f}, 是未命名声纹: {is_unnamed})")
-                else:
-                    # 未识别到已知声纹，如果启用了自动注册，则注册为新声纹
-                    if auto_register:
-                        new_speaker_id = self.register_voice_from_embedding(embedding)
-                        speaker_identities[speaker] = new_speaker_id
-                        auto_registered_speakers[new_speaker_id] = {
-                            'original_id': speaker,
-                            'audio_length': len(combined_wav) / sr
-                        }
-                        print(f"未识别的说话人 {speaker} 已自动注册为新声纹: {new_speaker_id}")
-                    else:
-                        speaker_identities[speaker] = f"未知:{speaker}"
-                        print(f"说话人 {speaker} 未能识别 (最高相似度: {best_score:.4f}, 低于阈值 {threshold})")
-            else:
-                speaker_identities[speaker] = f"无有效音频_{speaker}"
-                print(f"说话人 {speaker} 没有有效的音频片段")
-
-        # 返回识别结果和自动注册的声纹信息
-        return speaker_identities, auto_registered_speakers
-
-    def _cosine_similarity(self, a, b):
-        """计算两个向量之间的余弦相似度"""
-        return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-    def list_registered_voices(self, include_unnamed=True):
-        """列出所有注册声纹"""
-        named_count = len(self.voice_prints)
-        unnamed_count = len(self.unnamed_voice_prints)
-
-        if named_count == 0 and unnamed_count == 0:
-            print("No voice prints registered.")
-            return
-
-        if named_count > 0:
-            print(f"Currently registered named voice prints ({named_count}):")
-            for i, name in enumerate(self.voice_prints.keys(), 1):
-                print(f"  {i}. {name}")
-
-        if include_unnamed and unnamed_count > 0:
-            print(f"\nCurrently registered unnamed voice prints ({unnamed_count}):")
-            for i, speaker_id in enumerate(self.unnamed_voice_prints.keys(), 1):
-                print(f"  {i}. {speaker_id}")
-        return {"named_voice_prints": list(self.voice_prints.keys()), "unnamed_voice_prints": list(self.unnamed_voice_prints.keys())}
+import os
+import soundfile as sf
 
 
 class FunASRTranscriber:
@@ -350,6 +119,7 @@ class FunASRTranscriber:
     def __init__(self, device="cpu",
                  model_manager=None, voice_print_manager=None,
                  voice_prints_path=DEFAULT_VOICE_PRINTS_PATH,
+                 max_voiceprint_length=DEFAULT_VOICEPRINT_MAX_LENGTH,
                  funasr_model="paraformer-zh",
                  funasr_model_revision="v2.0.4",
                  vad_model="fsmn-vad",
@@ -386,11 +156,11 @@ class FunASRTranscriber:
         if voice_print_manager is None and self.speaker_encoder is not None:
             self.voice_print_manager = VoicePrintManager(
                 self.speaker_encoder,
-                voice_prints_path=voice_prints_path
+                voice_prints_dir=voice_prints_path,
+                max_voiceprint_length=max_voiceprint_length
             )
         else:
             self.voice_print_manager = voice_print_manager
-
 
     def _format_output_segment(self, start_time, end_time, speaker_name, text, file_location, file_date, file_time):
         """格式化输出段落，包含地点和时间信息"""
@@ -418,7 +188,7 @@ class FunASRTranscriber:
                         file_date=None,
                         file_time=None):
         """转写音频文件并进行说话人识别，可选自动注册未知说话人
-        返回: (转写文本, 自动注册的说话人字典, 音频时长秒数)
+        返回: (转写文本, 自动注册的说话人字典和音频样本, 音频时长秒数)
         """
         print(f"转写音频文件: {audio_file_path}...")
 
@@ -440,6 +210,7 @@ class FunASRTranscriber:
         # 初始化变量
         transcript = ""
         auto_registered_speakers = {}
+        voiceprint_audio_samples = {}
         audio_duration = 0.0  # 初始化音频时长
 
         # 检查是否有sentence_info字段（包含说话人分离信息）
@@ -491,13 +262,14 @@ class FunASRTranscriber:
             diarize_segments = pd.DataFrame(segments_data)
 
             # 3. 使用新方法识别说话人身份，启用自动注册
-            speaker_mapping, auto_registered = self.voice_print_manager.identify_speakers(
+            speaker_mapping, auto_registered, voiceprint_samples = self.voice_print_manager.identify_speakers(
                 diarize_segments,
                 audio_file_path,
                 threshold=threshold,
                 auto_register=auto_register_unknown
             )
             auto_registered_speakers = auto_registered
+            voiceprint_audio_samples = voiceprint_samples
 
             # 4. 格式化输出
             print("步骤3: 格式化最终输出...")
@@ -548,17 +320,21 @@ class FunASRTranscriber:
             for speaker_id, info in auto_registered_speakers.items():
                 print(
                     f"  - 说话人ID: {speaker_id} (原始ID: {info['original_id']}, 音频长度: {info['audio_length']:.2f}秒)")
+                if 'audio_path' in info and info['audio_path']:
+                    print(f"    声纹音频样本: {info['audio_path']}")
 
             print("\n您可以使用 rename_voice_print 方法为这些自动注册的声纹分配人名。")
             print("例如: transcriber.rename_voice_print('" + list(auto_registered_speakers.keys())[0] + "', '新人名')")
 
-        # return transcript, auto_registered_speakers, audio_duration, output_file  # 现在返回三个值
+        # 返回结果字典
         return {
             "transcript": transcript,
             "auto_registered_speakers": auto_registered_speakers,
+            "voiceprint_audio_samples": voiceprint_audio_samples,
             "audio_duration": audio_duration,
             "output_file": output_file
         }
+
     def _merge_same_speaker_segments(self, segments, max_gap_ms=3000):
         """合并相同说话人的短片段，用于提高声纹识别准确性
 
@@ -692,7 +468,8 @@ def main():
     # 创建转写器
     transcriber = FunASRTranscriber(
         device=device,
-        voice_prints_path=os.path.join(os.path.expanduser("~"), ".cache", "voice_prints_ecapa.pkl"),
+        voice_prints_path=os.path.join(os.path.expanduser("~"), ".cache"),
+        max_voiceprint_length=30,  # 限制声纹最大长度为30秒
         funasr_model="paraformer-zh",
         funasr_model_revision="v2.0.4",
         vad_model="fsmn-vad",
@@ -703,20 +480,34 @@ def main():
         spk_model_revision="v2.0.2"
     )
 
-    # transcriber.clear_voice_prints()
-    # transcriber.rename_voice_print("Speaker_b9012ed2", "刘星")
     # 列出注册声纹
+    transcriber.clear_voice_prints()
     transcriber.list_registered_voices()
 
-    # 注册声纹
-    # transcriber.register_voices_from_directory("~/Desktop/voice2text/src/data/sample")
 
     # 转写音频文件，启用自动注册未知声纹
-    transcript, auto_registered, duration = transcriber.transcribe_file(audio_file, threshold=0.5, auto_register_unknown=True)
+    result = transcriber.transcribe_file(
+        audio_file,
+        threshold=0.5,
+        auto_register_unknown=True
+    )
 
     # 打印结果
-    print("Transcription with Timestamps and Speaker Identification:")
-    print(transcript)
+    print("\nTranscription with Timestamps and Speaker Identification:")
+    print(result["transcript"])
+
+    # 打印自动注册的声纹信息
+    if result["auto_registered_speakers"]:
+        print("\n自动注册的声纹信息:")
+        for speaker_id, info in result["auto_registered_speakers"].items():
+            print(f"  - {speaker_id}: 音频长度 {info['audio_length']:.2f}秒")
+            if 'audio_path' in info:
+                print(f"    声纹音频样本: {info['audio_path']}")
+
+    # 示范如何重命名声纹
+    if result["auto_registered_speakers"]:
+        first_speaker = list(result["auto_registered_speakers"].keys())[0]
+        print(f"\n示例 - 重命名声纹: transcriber.rename_voice_print('{first_speaker}', '刘星')")
 
 
 if __name__ == "__main__":
