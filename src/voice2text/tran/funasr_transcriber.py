@@ -6,7 +6,7 @@ import pandas as pd
 from funasr import AutoModel
 from speechbrain.inference import EncoderClassifier
 
-from src.voice2text.tran.voiceprint_manager import VoicePrintManager
+from voice2text.tran.voiceprint_manager import VoicePrintManager
 
 # 默认路径常量
 DEFAULT_VOICE_PRINTS_PATH = os.path.join(os.path.expanduser("~"), ".cache")
