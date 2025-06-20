@@ -13,7 +13,6 @@ import uuid
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, Awaitable, Union, BinaryIO
@@ -1026,10 +1025,10 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
-from voiceprint_manager_v2 import (
+from voice2text.tran.voiceprint_manager_v2 import (
     create_vector_voiceprint_manager, AudioInputHandler, VectorEnhancedVoicePrintManager
 )
-from vector_base import VectorDBType
+from voice2text.tran.vector_base import VectorDBType
 
 
 @dataclass

@@ -9,7 +9,7 @@ from speechbrain.inference import EncoderClassifier
 from voice2text.tran.voiceprint_manager import VoicePrintManager
 
 # 默认路径常量
-DEFAULT_VOICE_PRINTS_PATH = os.path.join(os.path.expanduser("~"), ".cache")
+DEFAULT_VOICE_PRINTS_PATH = os.path.join(os.path.expanduser("~"), ".cache", "voice_print")
 DEFAULT_VOICEPRINT_MAX_LENGTH = 30  # 默认声纹最大长度（秒）
 
 
@@ -472,8 +472,12 @@ def main():
         max_voiceprint_length=30,  # 限制声纹最大长度为30秒
         funasr_model="paraformer-zh",
         funasr_model_revision="v2.0.4",
+        # funasr_model="dengcunqin/speech_paraformer_large_asr_mtl-16k-common-vocab11666-pytorch",
+        # funasr_model_revision="master",
         vad_model="fsmn-vad",
         vad_model_revision="v2.0.4",
+        # vad_model=None,
+        # vad_model_revision=None,
         punc_model="ct-punc",
         punc_model_revision="v2.0.4",
         spk_model="cam++",

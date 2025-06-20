@@ -2,7 +2,7 @@ import asyncio
 
 from voice2text.tran.server import VoiceSDKServer
 from voice2text.tran.speech2text import VectorConfigFactory, VectorAsyncVoice2TextService, ConfigFactory
-from vector_base import VectorDBType
+from voice2text.tran.vector_base import VectorDBType
 import uvicorn
 #
 # if __name__ == "__main__":

@@ -7,7 +7,7 @@ from typing import Union, BinaryIO, Optional, Tuple
 
 import numpy as np
 
-from vector_base import (
+from voice2text.tran.vector_base import (
     VectorDatabaseFactory, VectorDBType,
     VectorDBConfigFactory
 )
@@ -166,7 +166,7 @@ import numpy as np
 import pandas as pd
 import soundfile as sf
 
-from vector_base import VoicePrintRecord
+from voice2text.tran.vector_base import VoicePrintRecord
 from voice2text.tran.filesystem import ImprovedFileManager
 
 
@@ -888,7 +888,7 @@ async def create_vector_voiceprint_manager(
 
 async def example_usage():
     """使用示例"""
-    from vector_base import VectorDBType
+    from voice2text.tran.vector_base import VectorDBType
 
     # 假设已有的组件（实际使用时需要创建真实的实例）
     speaker_model = None  # SpeakerModel instance
