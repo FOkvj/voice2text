@@ -4,19 +4,17 @@
 
 import asyncio
 import hashlib
+import io
 import json
-import os
-import shutil
-import tempfile
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, Any, Optional, Union, BinaryIO, List, Tuple
 from enum import Enum
-import io
-import aiofiles
+from pathlib import Path
+from typing import Dict, Any, Optional, Union, BinaryIO, List, Literal, Tuple
+
 import aioboto3
+import aiofiles
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, Field
 
@@ -41,6 +39,7 @@ class StorageType(Enum):
 
 class StorageConfig(BaseModel):
     """存储配置基类"""
+    storage_type: StorageType
     metadata_backend: str = "json"  # json, redis, dynamodb等
     enable_versioning: bool = False
     enable_encryption: bool = False
@@ -53,6 +52,7 @@ class LocalStorageConfig(StorageConfig):
     """本地存储配置"""
     base_dir: str
     temp_dir: Optional[str] = Field(default="/tmp/local_cache", description="临时文件目录")
+    storage_type: StorageType = Field(default=StorageType.LOCAL, description="local存储类型")
 
 
 class S3StorageConfig(StorageConfig):
@@ -64,6 +64,7 @@ class S3StorageConfig(StorageConfig):
     secret_access_key: Optional[str] = None
     prefix: str = ""  # S3键前缀
     temp_dir: str = "/tmp/s3_cache"
+    storage_type: StorageType = Field(default=StorageType.S3, description="s3存储类型")
 
 
 # ============================================================================
@@ -145,6 +146,11 @@ class FileStorageInterface(ABC):
     @abstractmethod
     async def load(self, path: str) -> bytes:
         """加载文件内容"""
+        pass
+
+    @abstractmethod
+    async def load_stream(self, path: str) -> BinaryIO:
+        """加载文件并返回流对象"""
         pass
 
     @abstractmethod
@@ -246,6 +252,19 @@ class LocalFileStorage(FileStorageInterface):
 
         async with aiofiles.open(full_path, 'rb') as f:
             return await f.read()
+
+    async def load_stream(self, path: str) -> BinaryIO:
+        """从本地加载文件并返回流对象"""
+        full_path = self.base_dir / path
+
+        if not full_path.exists():
+            raise FileNotFoundError(f"File not found: {path}")
+
+        # 读取文件内容到内存并返回BytesIO流
+        async with aiofiles.open(full_path, 'rb') as f:
+            content = await f.read()
+
+        return io.BytesIO(content)
 
     async def exists(self, path: str) -> bool:
         """检查文件是否存在"""
@@ -436,6 +455,23 @@ class S3FileStorage(FileStorageInterface):
                     Key=s3_key
                 )
                 return await response['Body'].read()
+            except ClientError as e:
+                if e.response['Error']['Code'] == 'NoSuchKey':
+                    raise FileNotFoundError(f"File not found: {path}")
+                raise
+
+    async def load_stream(self, path: str) -> BinaryIO:
+        """从S3加载文件并返回流对象"""
+        s3_key = self._get_s3_key(path)
+
+        async with self.session.client('s3', endpoint_url=self.config.endpoint_url) as s3:
+            try:
+                response = await s3.get_object(
+                    Bucket=self.config.bucket_name,
+                    Key=s3_key
+                )
+                content = await response['Body'].read()
+                return io.BytesIO(content)
             except ClientError as e:
                 if e.response['Error']['Code'] == 'NoSuchKey':
                     raise FileNotFoundError(f"File not found: {path}")
@@ -772,20 +808,43 @@ class ImprovedFileManager:
         temp_path = await self.storage.get_temp_path(file_meta.storage_path)
         return temp_path
 
-    async def load_file(self, file_id: str) -> Optional[bytes]:
+    async def load_file(self, file_id: str) -> Tuple[Optional[FileMetadata], Optional[bytes]]:
         """加载文件内容"""
         if not self._initialized:
             await self.initialize()
 
         if file_id not in self.metadata:
-            return None
+            return None, None
 
         file_meta = self.metadata[file_id]
-
         try:
-            return await self.storage.load(file_meta.storage_path)
+            return file_meta, await self.storage.load(file_meta.storage_path)
         except FileNotFoundError:
-            return None
+            return None, None
+
+    async def load_file_stream(self, file_id: str) -> Tuple[Optional[FileMetadata], Optional[BinaryIO]]:
+        """
+        加载文件并返回元数据和流对象的元组
+
+        Args:
+            file_id: 文件ID
+
+        Returns:
+            Tuple[FileMetadata, BinaryIO]: 文件元数据和二进制流对象的元组
+            如果文件不存在，返回 (None, None)
+        """
+        if not self._initialized:
+            await self.initialize()
+
+        if file_id not in self.metadata:
+            return None, None
+
+        file_meta = self.metadata[file_id]
+        try:
+            stream = await self.storage.load_stream(file_meta.storage_path)
+            return file_meta, stream
+        except FileNotFoundError:
+            return None, None
 
     async def delete_file(self, file_id: str) -> bool:
         """删除文件"""
@@ -821,6 +880,10 @@ class ImprovedFileManager:
                     'metadata': meta.metadata
                 })
         return files
+
+    def get_file_by_id(self, file_id: str) -> Optional[FileMetadata]:
+        """通过文件ID获取文件元数据"""
+        return self.metadata.get(file_id)
 
     async def copy_file(self, file_id: str, new_category: Optional[str] = None) -> Optional[str]:
         """复制文件"""

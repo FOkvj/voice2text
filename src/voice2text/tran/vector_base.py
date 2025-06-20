@@ -175,7 +175,7 @@ class VectorDatabaseInterface(ABC):
         pass
 
     @abstractmethod
-    async def list_speakers(self) -> List[str]:
+    async def list_speakers(self) -> Dict[str, List]:
         """列出所有说话人ID"""
         pass
 
@@ -517,17 +517,18 @@ class ChromaDBImplementation(VectorDatabaseInterface):
             self.logger.error(f"Failed to count vectors: {e}")
             return 0
 
-    async def list_speakers(self) -> List[str]:
+    async def list_speakers(self) -> Dict[str, List]:
         """列出所有说话人ID"""
         try:
             results = self.collection.get(include=['metadatas'])
-            speakers = set()
+            meta_dict = {}
+            for meta in results['metadatas']:
+                speaker_id = meta['speaker_id']
+                if speaker_id not in meta_dict:
+                    meta_dict[speaker_id] = []
+                meta_dict[speaker_id].append(meta)
+            return meta_dict
 
-            if results['metadatas']:
-                for metadata in results['metadatas']:
-                    speakers.add(metadata['speaker_id'])
-
-            return list(speakers)
 
         except Exception as e:
             self.logger.error(f"Failed to list speakers: {e}")

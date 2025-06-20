@@ -1,7 +1,7 @@
 import asyncio
 
 from voice2text.tran.server import VoiceSDKServer
-from voice2text.tran.tran2 import VectorConfigFactory, VectorAsyncVoice2TextService, ConfigFactory
+from voice2text.tran.speech2text import VectorConfigFactory, VectorAsyncVoice2TextService, ConfigFactory
 from vector_base import VectorDBType
 import uvicorn
 #
@@ -69,7 +69,7 @@ async def start_server():
     voice_service = VectorAsyncVoice2TextService(service_config)
     await voice_service.start()
     # 2. 创建并启动服务器
-    server = VoiceSDKServer(voice_service, upload_dir="/Users/dongzhancai1/Desktop/voice2text/src/voice2text/tran/uploads")
+    server = VoiceSDKServer(voice_service)
 
     # 3. 使用uvicorn运行FastAPI应用
     config = uvicorn.Config(

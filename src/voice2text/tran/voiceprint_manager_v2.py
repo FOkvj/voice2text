@@ -2,30 +2,181 @@
 # 基于向量数据库的增强声纹管理器
 # ============================================================================
 
+import tempfile
+from typing import Union, BinaryIO, Optional, Tuple
+
+import numpy as np
+
+from vector_base import (
+    VectorDatabaseFactory, VectorDBType,
+    VectorDBConfigFactory
+)
+
+
+class AudioInputHandler:
+    """音频输入处理器 - 统一处理文件路径和二进制数据"""
+
+    def __init__(self, temp_dir: Optional[str] = None):
+        self.temp_dir = temp_dir or tempfile.gettempdir()
+        self._temp_files = []  # 跟踪临时文件以便清理
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup_temp_files()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup_temp_files()
+
+    def prepare_audio_input(self,
+                            audio_input: Union[str, bytes, BinaryIO],
+                            target_sr: int = 16000) -> Tuple[str, bool]:
+        """
+        准备音频输入，统一转换为文件路径
+
+        Args:
+            audio_input: 音频输入（文件路径、字节数据或文件对象）
+            target_sr: 目标采样率
+
+        Returns:
+            Tuple[str, bool]: (音频文件路径, 是否为临时文件)
+        """
+        if isinstance(audio_input, str):
+            # 文件路径
+            if not os.path.exists(audio_input):
+                raise FileNotFoundError(f"Audio file not found: {audio_input}")
+            return audio_input, False
+
+        elif isinstance(audio_input, bytes):
+            # 字节数据
+            return self._save_bytes_to_temp_file(audio_input), True
+
+        elif hasattr(audio_input, 'read'):
+            # 文件对象
+            return self._save_file_object_to_temp_file(audio_input), True
+
+        else:
+            raise ValueError(f"Unsupported audio input type: {type(audio_input)}")
+
+    def load_audio_data(self,
+                        audio_input: Union[str, bytes, BinaryIO],
+                        target_sr: int = 16000) -> Tuple[np.ndarray, int]:
+        """
+        直接加载音频数据，不创建临时文件
+
+        Args:
+            audio_input: 音频输入
+            target_sr: 目标采样率
+
+        Returns:
+            Tuple[np.ndarray, int]: (音频数据, 采样率)
+        """
+        if isinstance(audio_input, str):
+            # 文件路径
+            wav, sr = librosa.load(audio_input, sr=target_sr, mono=True)
+            return wav, sr
+
+        elif isinstance(audio_input, bytes):
+            # 字节数据
+            with io.BytesIO(audio_input) as buffer:
+                wav, sr = sf.read(buffer)
+                if sr != target_sr:
+                    wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+                return wav, target_sr
+
+        elif hasattr(audio_input, 'read'):
+            # 文件对象
+            audio_input.seek(0)  # 确保从开头读取
+            wav, sr = sf.read(audio_input)
+            if sr != target_sr:
+                wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+            return wav, target_sr
+
+        else:
+            raise ValueError(f"Unsupported audio input type: {type(audio_input)}")
+
+    def _save_bytes_to_temp_file(self, audio_bytes: bytes) -> str:
+        """保存字节数据到临时文件"""
+        temp_file = os.path.join(
+            self.temp_dir,
+            f"temp_audio_{uuid.uuid4().hex[:8]}.wav"
+        )
+
+        # 检测音频格式并保存
+        try:
+            # 尝试直接作为wav格式读取
+            with io.BytesIO(audio_bytes) as buffer:
+                wav, sr = sf.read(buffer)
+                sf.write(temp_file, wav, sr)
+        except Exception:
+            # 如果失败，直接写入字节（假设是有效的音频格式）
+            with open(temp_file, 'wb') as f:
+                f.write(audio_bytes)
+
+        self._temp_files.append(temp_file)
+        return temp_file
+
+    def _save_file_object_to_temp_file(self, file_obj: BinaryIO) -> str:
+        """保存文件对象到临时文件"""
+        temp_file = os.path.join(
+            self.temp_dir,
+            f"temp_audio_{uuid.uuid4().hex[:8]}.wav"
+        )
+
+        file_obj.seek(0)  # 确保从开头读取
+
+        try:
+            # 尝试作为音频文件读取并保存为wav
+            wav, sr = sf.read(file_obj)
+            sf.write(temp_file, wav, sr)
+        except Exception:
+            # 如果失败，直接复制字节
+            file_obj.seek(0)
+            with open(temp_file, 'wb') as f:
+                f.write(file_obj.read())
+
+        self._temp_files.append(temp_file)
+        return temp_file
+
+    def cleanup_temp_files(self):
+        """清理临时文件"""
+        for temp_file in self._temp_files:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except Exception as e:
+                print(f"Warning: Failed to remove temp file {temp_file}: {e}")
+        self._temp_files.clear()
+
+
 import asyncio
+import io
+import logging
+import os
 import uuid
 from datetime import datetime
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, Union, BinaryIO, List
 
 import librosa
 import numpy as np
 import pandas as pd
 import soundfile as sf
 
-from vector_base import (
-    VectorDatabaseInterface, VectorDatabaseFactory, VectorDBType,
-    VoicePrintRecord, VectorDBConfigFactory
-)
+from vector_base import VoicePrintRecord
 from voice2text.tran.filesystem import ImprovedFileManager
 
 
 class VectorEnhancedVoicePrintManager:
-    """基于向量数据库的增强声纹管理器"""
+    """基于向量数据库的增强声纹管理器 - 支持多种音频输入格式"""
 
     def __init__(self,
                  speaker_model,  # SpeakerModel instance
                  file_manager: ImprovedFileManager,  # FileManager instance
-                 vector_db: VectorDatabaseInterface,
+                 vector_db,  # VectorDatabaseInterface instance
                  config,  # SpeakerConfig instance
                  target_sr: int = 16000):
         """
@@ -44,6 +195,9 @@ class VectorEnhancedVoicePrintManager:
         self.config = config
         self.target_sr = target_sr
 
+        # 日志器
+        self.logger = logging.getLogger(f"{__name__}.VectorEnhancedVoicePrintManager")
+
         # 内存缓存 - 用于快速访问
         self._speaker_cache = {}  # speaker_id -> averaged_embedding
         self._cache_dirty = True
@@ -56,7 +210,7 @@ class VectorEnhancedVoicePrintManager:
 
         # 加载缓存
         await self._load_speaker_cache()
-        print("VectorEnhancedVoicePrintManager initialized successfully")
+        self.logger.info("VectorEnhancedVoicePrintManager initialized successfully")
 
     async def _load_speaker_cache(self):
         """加载说话人缓存"""
@@ -64,14 +218,14 @@ class VectorEnhancedVoicePrintManager:
             speakers = await self.vector_db.list_speakers()
             self._speaker_cache.clear()
 
-            for speaker_id in speakers:
+            for speaker_id in speakers.keys():
                 await self._update_speaker_cache(speaker_id)
 
             self._cache_dirty = False
-            print(f"Loaded cache for {len(speakers)} speakers")
+            self.logger.info(f"Loaded cache for {len(speakers)} speakers")
 
         except Exception as e:
-            print(f"Error loading speaker cache: {e}")
+            self.logger.error(f"Error loading speaker cache: {e}")
 
     async def _update_speaker_cache(self, speaker_id: str):
         """更新特定说话人的缓存"""
@@ -85,17 +239,76 @@ class VectorEnhancedVoicePrintManager:
                 self._speaker_cache[speaker_id] = avg_embedding
 
         except Exception as e:
-            print(f"Error updating cache for speaker {speaker_id}: {e}")
+            self.logger.error(f"Error updating cache for speaker {speaker_id}: {e}")
 
-    async def register_voice(self, person_name: str, audio_file_path: str) -> Tuple[str, str]:
+    async def delete_speaker_audio_sample(self, speaker_id: str, file_id: str) -> bool:
+        """
+        删除特定说话人的某个音频样本
+
+        Args:
+            speaker_id: 说话人ID
+            file_id: 音频文件ID
+
+        Returns:
+            bool: 删除是否成功
+        """
+        try:
+            # 验证说话人是否存在
+            speaker_records = await self.vector_db.get_vectors_by_speaker(speaker_id)
+            if not speaker_records:
+                self.logger.warning(f"Speaker {speaker_id} does not exist")
+                return False
+
+            # 查找指定的音频记录
+            target_record = None
+            for record in speaker_records:
+                if record.id == file_id:
+                    target_record = record
+                    break
+
+            if not target_record:
+                self.logger.warning(f"Audio sample {file_id} not found for speaker {speaker_id}")
+                return False
+
+            # 删除向量数据库中的记录
+            success = await self.vector_db.delete_vector(file_id)
+            if not success:
+                self.logger.error(f"Failed to delete vector record {file_id}")
+                return False
+
+            # 删除音频文件
+            await self._delete_audio_file(file_id)
+
+            # 更新缓存
+            await self._update_speaker_cache(speaker_id)
+
+            self.logger.info(f"Successfully deleted audio sample {file_id} for speaker {speaker_id}")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error deleting audio sample {file_id} for speaker {speaker_id}: {e}")
+            return False
+
+    async def register_voice(self,
+                             person_name: str,
+                             audio_input: Union[str, bytes, BinaryIO],
+                             cleanup_temp: bool = True) -> Tuple[str, str]:
         """
         注册新声纹到向量数据库
+
+        Args:
+            person_name: 人名
+            audio_input: 音频输入（文件路径、字节数据或文件对象）
+            cleanup_temp: 是否自动清理临时文件
+
+        Returns:
+            Tuple[str, str]: (speaker_id, sample_id)
         """
-        print(f"正在注册声纹: {person_name}")
+        self.logger.info(f"Registering voice for: {person_name}")
 
         try:
-            # 处理音频
-            wav, sr = librosa.load(audio_file_path, sr=self.target_sr, mono=True)
+            # 加载音频数据
+            wav, sr = self._load_audio_data(audio_input, self.target_sr)
             wav = self._trim_audio(wav, sr, self.config.max_voiceprint_length)
 
             # 提取嵌入向量
@@ -115,14 +328,14 @@ class VectorEnhancedVoicePrintManager:
 
                 sample_num = self.config.max_samples_per_voiceprint
 
-            # 保存音频文件 - 修改为异步调用
+            # 保存音频文件
             audio_data = self._wav_to_bytes(wav, sr)
             filename = f"{person_name}_sample{sample_num}.wav"
 
             file_id = await self.file_manager.save_file(
                 data=audio_data,
                 filename=filename,
-                category="voiceprints",
+                category="voiceprint",
                 metadata={
                     'speaker_id': person_name,
                     'sample_number': int(sample_num),
@@ -155,17 +368,17 @@ class VectorEnhancedVoicePrintManager:
             await self._update_speaker_cache(person_name)
 
             sample_id = f"{person_name}+sample{sample_num}.wav"
-            print(f"声纹注册成功: {person_name}，样本ID: {sample_id}")
+            self.logger.info(f"Voice registration successful for {person_name}, sample ID: {sample_id}")
 
             return person_name, sample_id
 
         except Exception as e:
-            print(f"声纹注册失败: {e}")
+            self.logger.error(f"Voice registration failed for {person_name}: {e}")
             raise
 
     async def identify_speakers(self,
                                 diarize_segments: pd.DataFrame,
-                                audio_file_path: str,
+                                audio_input: Union[str, bytes, BinaryIO],
                                 threshold: float = 0.4,
                                 auto_register: bool = True) -> Tuple[Dict, Dict, Dict]:
         """
@@ -173,16 +386,17 @@ class VectorEnhancedVoicePrintManager:
 
         Args:
             diarize_segments: 分离的语音段落
-            audio_file_path: 音频文件路径
+            audio_input: 音频输入（文件路径、字节数据或文件对象）
             threshold: 识别阈值
             auto_register: 是否自动注册未知说话人
 
         Returns:
             Tuple[speaker_identities, auto_registered_speakers, voiceprint_audio_samples]
         """
-        print("基于向量数据库识别说话人...")
+        self.logger.info("Identifying speakers using vector database...")
 
-        wav, sr = librosa.load(audio_file_path, sr=self.target_sr, mono=True)
+        # 加载音频数据
+        wav, sr = self._load_audio_data(audio_input, self.target_sr)
 
         speaker_identities = {}
         auto_registered_speakers = {}
@@ -217,7 +431,7 @@ class VectorEnhancedVoicePrintManager:
 
                 if best_match and best_score >= threshold:
                     speaker_identities[speaker] = best_match
-                    print(f"说话人 {speaker} 被识别为: {best_match} (相似度: {best_score:.4f})")
+                    self.logger.info(f"Speaker {speaker} identified as: {best_match} (similarity: {best_score:.4f})")
                 else:
                     if auto_register:
                         new_speaker_id, sample_id = await self._register_unknown_speaker(
@@ -230,7 +444,7 @@ class VectorEnhancedVoicePrintManager:
                             'sample_id': sample_id
                         }
                         voiceprint_audio_samples[new_speaker_id] = sample_id
-                        print(f"未识别的说话人 {speaker} 已自动注册为: {new_speaker_id}")
+                        self.logger.info(f"Unknown speaker {speaker} auto-registered as: {new_speaker_id}")
                     else:
                         speaker_identities[speaker] = f"未知:{speaker}"
 
@@ -270,7 +484,7 @@ class VectorEnhancedVoicePrintManager:
             return best_speaker, best_score
 
         except Exception as e:
-            print(f"Error finding best match in database: {e}")
+            self.logger.error(f"Error finding best match in database: {e}")
             return None, 0.0
 
     async def _register_unknown_speaker(self,
@@ -281,14 +495,14 @@ class VectorEnhancedVoicePrintManager:
         """注册未知说话人到向量数据库"""
         speaker_id = f"Speaker_{uuid.uuid4().hex[:8]}"
 
-        # 保存音频样本 - 修改为异步调用
+        # 保存音频样本
         audio_bytes = self._wav_to_bytes(audio_data, sr)
         filename = f"{speaker_id}_sample1.wav"
 
         file_id = await self.file_manager.save_file(
             data=audio_bytes,
             filename=filename,
-            category="voiceprints",
+            category="voiceprint",
             metadata={
                 'speaker_id': speaker_id,
                 'sample_number': 1,
@@ -328,29 +542,26 @@ class VectorEnhancedVoicePrintManager:
     async def list_registered_voices(self, include_unnamed: bool = True) -> Dict:
         """列出所有注册的声纹"""
         try:
-            speakers = await self.vector_db.list_speakers()
+            speakers_metadata = await self.vector_db.list_speakers()
             named_voices = {}
             unnamed_voices = {}
 
-            for speaker_id in speakers:
-                records = await self.vector_db.get_vectors_by_speaker(speaker_id)
-                sample_ids = [f"{speaker_id}+sample{r.sample_number}.wav" for r in records]
-
+            for speaker_id in speakers_metadata.keys():
                 if speaker_id.startswith("Speaker_"):
-                    unnamed_voices[speaker_id] = sample_ids
+                    unnamed_voices[speaker_id] = speakers_metadata[speaker_id]
                 else:
-                    named_voices[speaker_id] = sample_ids
+                    named_voices[speaker_id] = speakers_metadata[speaker_id]
 
-            # 打印结果
+            # 记录结果
             if named_voices:
-                print(f"当前已注册的命名声纹 ({len(named_voices)}):")
+                self.logger.info(f"Current registered named voiceprints ({len(named_voices)}):")
                 for i, (name, samples) in enumerate(named_voices.items(), 1):
-                    print(f"  {i}. {name} ({len(samples)} 个样本)")
+                    self.logger.info(f"  {i}. {name} ({len(samples)} samples)")
 
             if include_unnamed and unnamed_voices:
-                print(f"当前已注册的未命名声纹 ({len(unnamed_voices)}):")
+                self.logger.info(f"Current registered unnamed voiceprints ({len(unnamed_voices)}):")
                 for i, (speaker_id, samples) in enumerate(unnamed_voices.items(), 1):
-                    print(f"  {i}. {speaker_id} ({len(samples)} 个样本)")
+                    self.logger.info(f"  {i}. {speaker_id} ({len(samples)} samples)")
 
             return {
                 "named_voice_prints": named_voices,
@@ -358,7 +569,7 @@ class VectorEnhancedVoicePrintManager:
             }
 
         except Exception as e:
-            print(f"Error listing registered voices: {e}")
+            self.logger.error(f"Error listing registered voices: {e}")
             return {"named_voice_prints": {}, "unnamed_voice_prints": {}}
 
     async def rename_voice_print(self, old_speaker_id: str, new_name: str) -> bool:
@@ -366,14 +577,14 @@ class VectorEnhancedVoicePrintManager:
         try:
             # 检查新名称是否已存在
             existing_speakers = await self.vector_db.list_speakers()
-            if new_name in existing_speakers:
-                print(f"目标名称 {new_name} 已存在")
+            if new_name in existing_speakers.keys():
+                self.logger.warning(f"Target name {new_name} already exists")
                 return False
 
             # 获取旧说话人的所有记录
             records = await self.vector_db.get_vectors_by_speaker(old_speaker_id)
             if not records:
-                print(f"说话人 {old_speaker_id} 不存在")
+                self.logger.warning(f"Speaker {old_speaker_id} does not exist")
                 return False
 
             # 更新所有记录的speaker_id
@@ -384,7 +595,7 @@ class VectorEnhancedVoicePrintManager:
                     {'speaker_id': new_name}
                 )
 
-                # 更新文件元数据 - 修改为异步调用
+                # 更新文件元数据
                 await self.file_manager.metadata_storage.update(
                     record.id,
                     {'metadata.speaker_id': new_name}
@@ -395,11 +606,11 @@ class VectorEnhancedVoicePrintManager:
                 self._speaker_cache[new_name] = self._speaker_cache[old_speaker_id]
                 del self._speaker_cache[old_speaker_id]
 
-            print(f"声纹 {old_speaker_id} 已重命名为 {new_name}")
+            self.logger.info(f"Voiceprint {old_speaker_id} renamed to {new_name}")
             return True
 
         except Exception as e:
-            print(f"Error renaming voice print: {e}")
+            self.logger.error(f"Error renaming voice print: {e}")
             return False
 
     async def delete_speaker(self, speaker_id: str) -> bool:
@@ -408,8 +619,8 @@ class VectorEnhancedVoicePrintManager:
             # 删除向量数据库中的记录
             deleted_count = await self.vector_db.delete_vectors_by_speaker(speaker_id)
 
-            # 删除音频文件 - 修改为异步调用
-            voiceprint_files = self.file_manager.list_files(category="voiceprints")
+            # 删除音频文件
+            voiceprint_files = await self._get_voiceprint_files_async()
             for file_info in voiceprint_files:
                 metadata = file_info.get('metadata', {})
                 if metadata.get('speaker_id') == speaker_id:
@@ -419,11 +630,11 @@ class VectorEnhancedVoicePrintManager:
             if speaker_id in self._speaker_cache:
                 del self._speaker_cache[speaker_id]
 
-            print(f"已删除说话人 {speaker_id} 的 {deleted_count} 个声纹记录")
+            self.logger.info(f"Deleted {deleted_count} voiceprint records for speaker {speaker_id}")
             return deleted_count > 0
 
         except Exception as e:
-            print(f"Error deleting speaker: {e}")
+            self.logger.error(f"Error deleting speaker: {e}")
             return False
 
     async def clear_voice_prints(self):
@@ -432,18 +643,18 @@ class VectorEnhancedVoicePrintManager:
             # 清空向量数据库
             await self.vector_db.clear_collection()
 
-            # 删除所有声纹文件 - 修改为异步调用
-            voiceprint_files = self.file_manager.list_files(category="voiceprints")
+            # 删除所有声纹文件
+            voiceprint_files = await self._get_voiceprint_files_async()
             for file_info in voiceprint_files:
                 await self.file_manager.delete_file(file_info['file_id'])
 
             # 清空缓存
             self._speaker_cache.clear()
 
-            print("已清空所有声纹数据")
+            self.logger.info("Cleared all voiceprint data")
 
         except Exception as e:
-            print(f"Error clearing voice prints: {e}")
+            self.logger.error(f"Error clearing voice prints: {e}")
 
     async def get_speaker_statistics(self) -> Dict[str, Any]:
         """获取说话人统计信息"""
@@ -457,9 +668,9 @@ class VectorEnhancedVoicePrintManager:
                 'speakers_detail': {}
             }
 
-            for speaker_id in speakers:
-                records = await self.vector_db.get_vectors_by_speaker(speaker_id)
-                sample_count = len(records)
+            for speaker_id, meta in speakers.items():
+
+                sample_count = len(meta)
                 stats['total_samples'] += sample_count
 
                 if speaker_id.startswith("Speaker_"):
@@ -469,21 +680,124 @@ class VectorEnhancedVoicePrintManager:
 
                 stats['speakers_detail'][speaker_id] = {
                     'sample_count': sample_count,
-                    'latest_update': max(r.created_at for r in records) if records else None
+                    'latest_update': max(r.created_at for r in meta) if meta else None
                 }
 
             return stats
 
         except Exception as e:
-            print(f"Error getting speaker statistics: {e}")
+            self.logger.error(f"Error getting speaker statistics: {e}")
             return {}
+
+    async def search_similar_voices(self,
+                                    audio_input: Union[str, bytes, BinaryIO],
+                                    top_k: int = 10,
+                                    threshold: float = 0.5) -> List[Tuple[str, float]]:
+        """
+        搜索相似的声纹
+
+        Args:
+            audio_input: 音频输入
+            top_k: 返回最相似的前k个
+            threshold: 相似度阈值
+
+        Returns:
+            相似声纹列表 [(speaker_id, similarity), ...]
+        """
+        try:
+            # 加载音频并提取特征
+            wav, sr = self._load_audio_data(audio_input, self.target_sr)
+
+            # 裁剪音频长度
+            max_length = self.config.max_voiceprint_length
+            if len(wav) > max_length * sr:
+                wav = wav[:int(max_length * sr)]
+
+            # 提取嵌入向量
+            embedding = self.speaker_model.encode_audio(wav)
+
+            # 在向量数据库中搜索
+            similar_vectors = await self.vector_db.search_similar_vectors(
+                query_vector=embedding,
+                top_k=top_k,
+                threshold=threshold
+            )
+
+            # 整理结果
+            results = [(record.speaker_id, similarity) for record, similarity in similar_vectors]
+
+            self.logger.info(f"Found {len(results)} similar voices")
+            return results
+
+        except Exception as e:
+            self.logger.error(f"Error searching similar voices: {e}")
+            return []
+
+
+    # ==================== 私有辅助方法 ====================
+
+    def _load_audio_data(self,
+                         audio_input: Union[str, bytes, BinaryIO],
+                         target_sr: int = 16000) -> Tuple[np.ndarray, int]:
+        """
+        加载音频数据
+
+        Args:
+            audio_input: 音频输入
+            target_sr: 目标采样率
+
+        Returns:
+            Tuple[np.ndarray, int]: (音频数据, 采样率)
+        """
+        if isinstance(audio_input, str):
+            # 文件路径
+            wav, sr = librosa.load(audio_input, sr=target_sr, mono=True)
+            return wav, sr
+
+        elif isinstance(audio_input, bytes):
+            # 字节数据
+            with io.BytesIO(audio_input) as buffer:
+                wav, sr = sf.read(buffer)
+                if sr != target_sr:
+                    wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+                return wav, target_sr
+
+        elif hasattr(audio_input, 'read'):
+            # 文件对象
+            audio_input.seek(0)  # 确保从开头读取
+            wav, sr = sf.read(audio_input)
+            if sr != target_sr:
+                wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+            return wav, target_sr
+
+        else:
+            raise ValueError(f"Unsupported audio input type: {type(audio_input)}")
 
     async def _delete_audio_file(self, file_id: str):
         """删除音频文件"""
         try:
             await self.file_manager.delete_file(file_id)
         except Exception as e:
-            print(f"Error deleting audio file {file_id}: {e}")
+            self.logger.error(f"Error deleting audio file {file_id}: {e}")
+
+    async def _get_voiceprint_files_async(self) -> List[Dict]:
+        """异步获取声纹文件列表"""
+        # 这里可能需要根据实际的文件管理器实现调整
+        try:
+            # 如果file_manager有异步方法
+            if hasattr(self.file_manager, 'list_files_async'):
+                return await self.file_manager.list_files_async(category="voiceprint")
+            else:
+                # 使用同步方法（在线程池中执行）
+                loop = asyncio.get_event_loop()
+                return await loop.run_in_executor(
+                    None,
+                    self.file_manager.list_files,
+                    "voiceprint"
+                )
+        except Exception as e:
+            self.logger.error(f"Error getting voiceprint files: {e}")
+            return []
 
     def _trim_audio(self, wav_data: np.ndarray, sr: int, max_length_sec: int) -> np.ndarray:
         """裁剪音频到指定长度"""
@@ -498,12 +812,12 @@ class VectorEnhancedVoicePrintManager:
 
     def _wav_to_bytes(self, wav_data: np.ndarray, sr: int) -> bytes:
         """将音频数据转换为字节"""
-        import io
         buffer = io.BytesIO()
         sf.write(buffer, wav_data, sr, format='WAV')
         return buffer.getvalue()
 
-    # 上下文管理器支持
+    # ==================== 上下文管理器支持 ====================
+
     async def __aenter__(self):
         await self.initialize()
         return self
@@ -511,8 +825,6 @@ class VectorEnhancedVoicePrintManager:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         # 如果需要，可以在这里进行清理工作
         pass
-
-
 # ============================================================================
 # 工厂函数 - 创建向量增强的声纹管理器
 # ============================================================================

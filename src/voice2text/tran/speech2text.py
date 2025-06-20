@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Callable, Awaitable, Union, BinaryIO
 from typing import List
 
+import pandas as pd
+
+from voice2text.tran.filesystem import ImprovedFileManager
+
 
 class ASRModelType(Enum):
     """ASR模型类型枚举"""
@@ -1021,9 +1025,9 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Tuple
-
+from datetime import datetime, timedelta
 from voiceprint_manager_v2 import (
-    create_vector_voiceprint_manager
+    create_vector_voiceprint_manager, AudioInputHandler, VectorEnhancedVoicePrintManager
 )
 from vector_base import VectorDBType
 
@@ -1063,41 +1067,41 @@ class VectorServiceConfig:
     instance_id: Optional[str] = None
     cluster_config: Optional[Dict[str, Any]] = None
 
+
 class VectorAsyncVoice2TextService:
-    """集成向量数据库的异步语音转文字服务"""
+    """集成向量数据库的异步语音转文字服务 - 支持多种音频输入格式"""
 
-    def __init__(self, config: VectorServiceConfig):
+    def __init__(self, config):
         self.config = config
+        self.logger = logging.getLogger(f"{__name__}.VectorAsyncVoice2TextService")
 
-        # 初始化文件管理器 - 修改为支持配置存储类型
-        self.file_manager = None  # 将在initialize中异步初始化
-        self.storage_config = self._create_storage_config()
-
-        # 初始化模型
+        # 初始化组件（在initialize中异步初始化）
+        self.file_manager: ImprovedFileManager = None
         self.asr_model = None
         self.speaker_model = None
-        self.voice_print_manager = None
+        self.voice_print_manager: VectorEnhancedVoicePrintManager  = None
+        self.task_manager = None
 
-        # 异步任务管理器
-        self.task_manager = VoiceTaskManager(
-            max_transcribe_concurrent=config.max_transcribe_concurrent,
-            max_speaker_concurrent=config.max_speaker_concurrent,
-            task_timeout=config.task_timeout
-        )
+        # 存储配置
+        self.storage_config = self._create_storage_config()
+
+        # 音频处理器
+        self.audio_handler = None
 
     def _create_storage_config(self):
         """创建存储配置"""
-        # 可以根据配置选择存储类型，这里默认使用本地存储
         storage_type = getattr(self.config, 'storage_type', 'local')
 
         if storage_type == 'local':
-            from filesystem import LocalStorageConfig  # 根据实际导入路径调整
+            # 假设存在LocalStorageConfig类
+            from voice2text.tran.filesystem import LocalStorageConfig
             return LocalStorageConfig(
                 base_dir=self.config.voice_prints_path,
                 temp_dir=self.config.temp_dir
             )
         elif storage_type == 's3':
-            from filesystem import S3StorageConfig  # 根据实际导入路径调整
+            # 假设存在S3StorageConfig类
+            from voice2text.tran.filesystem import S3StorageConfig
             s3_config = getattr(self.config, 's3_config', {})
             return S3StorageConfig(**s3_config)
         else:
@@ -1105,7 +1109,10 @@ class VectorAsyncVoice2TextService:
 
     async def initialize(self):
         """异步初始化服务"""
-        print("Initializing VectorAsyncVoice2TextService...")
+        self.logger.info("Initializing VectorAsyncVoice2TextService...")
+
+        # 初始化音频处理器
+        self.audio_handler = AudioInputHandler(self.config.temp_dir)
 
         # 初始化文件管理器
         await self._initialize_file_manager()
@@ -1116,11 +1123,14 @@ class VectorAsyncVoice2TextService:
         # 初始化向量增强的声纹管理器
         await self._initialize_vector_voiceprint_manager()
 
-        print("VectorAsyncVoice2TextService initialized successfully")
+        # 初始化任务管理器
+        await self._initialize_task_manager()
+
+        self.logger.info("VectorAsyncVoice2TextService initialized successfully")
 
     async def _initialize_file_manager(self):
         """异步初始化文件管理器"""
-        from filesystem import StorageFactory, ImprovedFileManager  # 根据实际导入路径调整
+        from voice2text.tran.filesystem import StorageFactory
 
         # 创建存储实例
         storage = StorageFactory.create_storage(self.storage_config)
@@ -1129,11 +1139,13 @@ class VectorAsyncVoice2TextService:
         self.file_manager = ImprovedFileManager(storage)
         await self.file_manager.initialize()
 
-        print("File manager initialized successfully")
+        self.logger.info("File manager initialized successfully")
 
     async def _initialize_models(self):
         """初始化ASR和说话人模型"""
-        print("Initializing models...")
+        self.logger.info("Initializing models...")
+
+        # 导入必要的类
 
         # 创建ASR模型
         asr_type = ASRModelType(self.config.asr_config.model_type)
@@ -1148,11 +1160,11 @@ class VectorAsyncVoice2TextService:
         self.speaker_model = ModelFactory.create_speaker_model(speaker_type, self.config.speaker_config)
         await loop.run_in_executor(None, self.speaker_model.load_model)
 
-        print("Models initialized successfully")
+        self.logger.info("Models initialized successfully")
 
     async def _initialize_vector_voiceprint_manager(self):
         """初始化向量增强的声纹管理器"""
-        print("Initializing vector-enhanced voiceprint manager...")
+        self.logger.info("Initializing vector-enhanced voiceprint manager...")
 
         # 准备向量数据库配置
         vector_db_config = self.config.vector_db_config.copy()
@@ -1173,17 +1185,32 @@ class VectorAsyncVoice2TextService:
             db_type=self.config.vector_db_type
         )
 
-        print("Vector-enhanced voiceprint manager initialized")
+        self.logger.info("Vector-enhanced voiceprint manager initialized")
+
+    async def _initialize_task_manager(self):
+        """初始化任务管理器"""
+
+        self.task_manager = VoiceTaskManager(
+            max_transcribe_concurrent=self.config.max_transcribe_concurrent,
+            max_speaker_concurrent=self.config.max_speaker_concurrent,
+            task_timeout=self.config.task_timeout,
+            enable_logging=self.config.enable_task_logging
+        )
+
+        self.logger.info("Task manager initialized")
 
     async def start(self):
         """启动服务"""
         await self.initialize()
         await self.task_manager.start()
-        print("VectorAsyncVoice2TextService started")
+        self.logger.info("VectorAsyncVoice2TextService started")
 
     async def stop(self):
         """停止服务"""
-        await self.task_manager.stop()
+        self.logger.info("Stopping VectorAsyncVoice2TextService...")
+
+        if self.task_manager:
+            await self.task_manager.stop()
 
         # 如果声纹管理器有向量数据库连接，断开连接
         if self.voice_print_manager and hasattr(self.voice_print_manager, 'vector_db'):
@@ -1193,171 +1220,185 @@ class VectorAsyncVoice2TextService:
         if self.file_manager:
             await self.file_manager.storage.disconnect()
 
-        print("VectorAsyncVoice2TextService stopped")
+        # 清理音频处理器
+        if self.audio_handler:
+            self.audio_handler.cleanup_temp_files()
+
+        self.logger.info("VectorAsyncVoice2TextService stopped")
+
+    # ==================== 核心转写方法 ====================
 
     async def transcribe_file_async(self,
-                                    audio_file_path: str,
+                                    audio_input: Union[str, bytes, BinaryIO],
                                     threshold: float = None,
                                     auto_register_unknown: bool = True,
                                     priority: int = 5,
                                     **kwargs) -> str:
-        """异步转写音频文件（使用向量数据库进行说话人识别）"""
+        """
+        异步转写音频（支持多种输入格式）
+
+        Args:
+            audio_input: 音频输入（文件路径、字节数据或文件对象）
+            threshold: 识别阈值
+            auto_register_unknown: 是否自动注册未知说话人
+            priority: 任务优先级
+            **kwargs: 其他参数
+
+        Returns:
+            任务ID
+        """
 
         async def transcribe_task():
             return await self._async_transcribe_file(
-                audio_file_path,
+                audio_input,
                 threshold,
                 auto_register_unknown,
                 kwargs
             )
+
+        # 生成输入描述用于元数据
+        input_description = self._get_input_description(audio_input)
 
         task_id = await self.task_manager.submit_task(
             transcribe_task,
             task_type="transcribe",
             priority=priority,
             metadata={
-                'audio_file': audio_file_path,
+                'audio_input': input_description,
                 'threshold': threshold,
                 'auto_register': auto_register_unknown
             }
         )
 
+        self.logger.info(f"Submitted transcribe task {task_id} for input: {input_description}")
         return task_id
 
     async def _async_transcribe_file(self,
-                                     audio_file_path: str,
+                                     audio_input: Union[str, bytes, BinaryIO],
                                      threshold: float = None,
                                      auto_register_unknown: bool = True,
                                      kwargs: Dict = None) -> Dict[str, Any]:
-        """异步转写方法（使用向量数据库）"""
+        """异步转写方法（支持多种输入格式）"""
         kwargs = kwargs or {}
+        input_desc = self._get_input_description(audio_input)
 
-        print(f"转写音频文件: {audio_file_path}")
+        self.logger.info(f"Starting transcription for: {input_desc}")
 
-        # 使用配置中的阈值作为默认值
         if threshold is None:
             threshold = self.config.speaker_config.threshold
 
-        # 解析文件名信息
-        file_location, file_date, file_time = self._parse_filename(audio_file_path)
+        # 解析文件信息
+        file_location = kwargs.get('file_location', '未知地点')
+        file_date = kwargs.get('file_date', '未知日期')
+        file_time = kwargs.get('file_time', '未知时间')
 
-        # ASR转写（在线程池中执行以避免阻塞）
-        asr_result = self.asr_model.transcribe(
-            audio_file_path,
-            **kwargs
-        )
-
-
-
-        # 初始化返回值
-        transcript = ""
-        auto_registered_speakers = {}
-        voiceprint_audio_samples = {}
-        audio_duration = 0.0
-
-        # 处理转写结果
-        if 'sentence_info' not in asr_result or not asr_result['sentence_info']:
-            # 没有说话人分离信息
-            full_text = asr_result['text']
-            timestamps = asr_result.get('timestamp', [])
-
-            if timestamps:
-                audio_duration = timestamps[-1][1] / 1000.0
-            else:
-                audio_duration = len(full_text) / 10  # 简单估算
-
-            transcript = self._format_single_speaker_output(
-                full_text, audio_duration, file_location, file_date, file_time
-            )
-        else:
-            # 有说话人分离信息
-            sentence_segments = asr_result['sentence_info']
-            audio_duration = max(seg['end'] for seg in sentence_segments) / 1000.0
-
-            # 转换为DataFrame
-            import pandas as pd
-            segments_data = []
-            for segment in sentence_segments:
-                segments_data.append({
-                    'speaker': segment['spk'],
-                    'start': segment['start'] / 1000.0,
-                    'end': segment['end'] / 1000.0,
-                    'text': segment['text']
-                })
-            diarize_segments = pd.DataFrame(segments_data)
-
-            # 使用向量数据库进行说话人识别
-            speaker_mapping, auto_registered, voiceprint_samples = await self.voice_print_manager.identify_speakers(
-                diarize_segments,
-                audio_file_path,
-                threshold=threshold,
-                auto_register=auto_register_unknown
+        # 准备音频文件路径（ASR模型可能需要文件路径）
+        async with AudioInputHandler(self.config.temp_dir) as audio_handler:
+            audio_file_path, is_temp = audio_handler.prepare_audio_input(
+                audio_input, self.config.target_sr
             )
 
-            auto_registered_speakers = auto_registered
-            voiceprint_audio_samples = voiceprint_samples
+            try:
+                self.logger.debug(f"Processing audio file: {audio_file_path} (temp: {is_temp})")
 
-            # 格式化输出
-            transcript = self._format_multi_speaker_output(
-                sentence_segments, speaker_mapping, file_location, file_date, file_time
-            )
+                # ASR转写
+                asr_result = self.asr_model.transcribe(audio_file_path, **kwargs)
 
-        # 保存转写结果
-        output_file = self._save_transcript(audio_file_path, transcript)
+                # 处理转写结果
+                transcript = ""
+                auto_registered_speakers = {}
+                voiceprint_audio_samples = {}
+                audio_duration = 0.0
 
-        # 打印自动注册信息
-        if auto_registered_speakers:
-            self._print_auto_registered_info(auto_registered_speakers)
+                if 'sentence_info' not in asr_result or not asr_result['sentence_info']:
+                    # 单说话人处理
+                    full_text = asr_result['text']
+                    timestamps = asr_result.get('timestamp', [])
 
-        return {
-            "transcript": transcript,
-            "auto_registered_speakers": auto_registered_speakers,
-            "voiceprint_audio_samples": voiceprint_audio_samples,
-            "audio_duration": audio_duration,
-            "output_file": output_file
-        }
+                    if timestamps:
+                        audio_duration = timestamps[-1][1] / 1000.0
+                    else:
+                        audio_duration = len(full_text) / 10  # 简单估算
 
-    async def register_voice_async(self, person_name: str, audio_file_path: str) -> str:
-        """异步注册声纹到向量数据库"""
+                    transcript = self._format_single_speaker_output(
+                        full_text, audio_duration, file_location, file_date, file_time
+                    )
 
-        async def register_task():
-            return await self.voice_print_manager.register_voice(person_name, audio_file_path)
+                    self.logger.info(f"Single speaker transcription completed, duration: {audio_duration:.2f}s")
+                else:
+                    # 多说话人处理
+                    sentence_segments = asr_result['sentence_info']
+                    audio_duration = max(seg['end'] for seg in sentence_segments) / 1000.0
 
-        task_id = await self.task_manager.submit_task(
-            register_task,
-            task_type="speaker",
-            metadata={'person_name': person_name, 'audio_file': audio_file_path}
-        )
+                    # 转换为DataFrame
+                    segments_data = []
+                    for segment in sentence_segments:
+                        segments_data.append({
+                            'speaker': segment['spk'],
+                            'start': segment['start'] / 1000.0,
+                            'end': segment['end'] / 1000.0,
+                            'text': segment['text']
+                        })
+                    diarize_segments = pd.DataFrame(segments_data)
 
-        return task_id
+                    self.logger.info(
+                        f"Multi-speaker transcription, {len(diarize_segments)} segments, duration: {audio_duration:.2f}s")
 
-    async def rename_voice_print_async(self, old_speaker_id: str, new_name: str) -> str:
-        """异步重命名声纹"""
+                    # 使用原始音频输入进行说话人识别（避免重复的临时文件创建）
+                    speaker_mapping, auto_registered, voiceprint_samples = await self.voice_print_manager.identify_speakers(
+                        diarize_segments,
+                        audio_input,  # 传递原始输入
+                        threshold=threshold,
+                        auto_register=auto_register_unknown
+                    )
 
-        async def rename_task():
-            return await self.voice_print_manager.rename_voice_print(old_speaker_id, new_name)
+                    auto_registered_speakers = auto_registered
+                    voiceprint_audio_samples = voiceprint_samples
 
-        task_id = await self.task_manager.submit_task(
-            rename_task,
-            task_type="speaker",
-            metadata={'old_speaker_id': old_speaker_id, 'new_name': new_name}
-        )
+                    # 格式化输出
+                    transcript = self._format_multi_speaker_output(
+                        sentence_segments, speaker_mapping, file_location, file_date, file_time
+                    )
 
-        return task_id
+                # 保存转写结果
+                output_file = self._save_transcript_from_input(audio_input, transcript)
 
-    async def delete_speaker_async(self, speaker_id: str) -> str:
-        """异步删除说话人"""
+                if auto_registered_speakers:
+                    self._log_auto_registered_info(auto_registered_speakers)
 
-        async def delete_task():
-            return await self.voice_print_manager.delete_speaker(speaker_id)
+                self.logger.info(f"Transcription completed successfully for: {input_desc}")
 
-        task_id = await self.task_manager.submit_task(
-            delete_task,
-            task_type="speaker",
-            metadata={'speaker_id': speaker_id, 'operation': 'delete'}
-        )
+                return {
+                    "transcript": transcript,
+                    "auto_registered_speakers": auto_registered_speakers,
+                    "voiceprint_audio_samples": voiceprint_audio_samples,
+                    "audio_duration": audio_duration,
+                    "output_file": output_file
+                }
 
-        return task_id
+            except Exception as e:
+                self.logger.error(f"Transcription failed for {input_desc}: {e}")
+                raise
+            finally:
+                # 清理临时文件
+                if is_temp and os.path.exists(audio_file_path):
+                    try:
+                        os.remove(audio_file_path)
+                        self.logger.debug(f"Cleaned up temp file: {audio_file_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to remove temp file {audio_file_path}: {e}")
+
+    # ==================== 声纹管理方法 ====================
+
+    async def register_voice_async(self,
+                                   person_name: str,
+                                   audio_input: Union[str, bytes, BinaryIO]) -> Tuple[str, str]:
+        """异步注册声纹（支持多种输入格式）"""
+
+
+        return await self.voice_print_manager.register_voice(person_name, audio_input)
+
+
 
     async def list_registered_voices_async(self, include_unnamed: bool = True) -> Dict:
         """异步列出注册的声纹"""
@@ -1367,69 +1408,149 @@ class VectorAsyncVoice2TextService:
         """异步获取说话人统计信息"""
         return await self.voice_print_manager.get_speaker_statistics()
 
+    # ==================== 搜索和相似度方法 ====================
+
     async def search_similar_voices(self,
-                                    audio_file_path: str,
+                                    audio_input: Union[str, bytes, BinaryIO],
                                     top_k: int = 10,
                                     threshold: float = 0.5) -> List[Tuple[str, float]]:
-        """搜索相似的声纹"""
+        """
+        搜索相似的声纹（支持多种输入格式）
+
+        Args:
+            audio_input: 音频输入（文件路径、字节数据或文件对象）
+            top_k: 返回最相似的前k个
+            threshold: 相似度阈值
+
+        Returns:
+            相似声纹列表
+        """
         try:
-            # 加载音频并提取特征
-            import librosa
-            wav, sr = librosa.load(audio_file_path, sr=self.config.target_sr, mono=True)
+            input_desc = self._get_input_description(audio_input)
+            self.logger.info(f"Searching similar voices for: {input_desc}")
 
-            # 裁剪音频长度
-            max_length = self.config.speaker_config.max_voiceprint_length
-            if len(wav) > max_length * sr:
-                wav = wav[:int(max_length * sr)]
+            async with AudioInputHandler(self.config.temp_dir) as audio_handler:
+                # 加载音频并提取特征
+                wav, sr = audio_handler.load_audio_data(audio_input, self.config.target_sr)
 
-            # 在线程池中提取嵌入向量
-            loop = asyncio.get_event_loop()
-            embedding = await loop.run_in_executor(
-                None,
-                self.speaker_model.encode_audio,
-                wav
-            )
+                # 裁剪音频长度
+                max_length = self.config.speaker_config.max_voiceprint_length
+                if len(wav) > max_length * sr:
+                    wav = wav[:int(max_length * sr)]
 
-            # 在向量数据库中搜索
-            similar_vectors = await self.voice_print_manager.vector_db.search_similar_vectors(
-                query_vector=embedding,
-                top_k=top_k,
-                threshold=threshold
-            )
+                # 在线程池中提取嵌入向量
+                loop = asyncio.get_event_loop()
+                embedding = await loop.run_in_executor(
+                    None,
+                    self.speaker_model.encode_audio,
+                    wav
+                )
 
-            # 整理结果
-            results = [(record.speaker_id, similarity) for record, similarity in similar_vectors]
-            return results
+                # 在向量数据库中搜索
+                similar_vectors = await self.voice_print_manager.vector_db.search_similar_vectors(
+                    query_vector=embedding,
+                    top_k=top_k,
+                    threshold=threshold
+                )
+
+                # 整理结果
+                results = [(record.speaker_id, similarity) for record, similarity in similar_vectors]
+
+                self.logger.info(f"Found {len(results)} similar voices for: {input_desc}")
+                return results
 
         except Exception as e:
-            print(f"Error searching similar voices: {e}")
+            self.logger.error(f"Error searching similar voices for {input_desc}: {e}")
             return []
 
-    async def batch_register_voices(self, voice_data: List[Tuple[str, str]]) -> List[str]:
-        """批量注册声纹"""
+    # ==================== 批量处理方法 ====================
+
+    async def batch_register_voices(self, voice_data: List[Tuple[str, Union[str, bytes, BinaryIO]]]) -> List[str]:
+        """
+        批量注册声纹（支持混合输入类型）
+
+        Args:
+            voice_data: [(person_name, audio_input), ...] 列表
+
+        Returns:
+            任务ID列表
+        """
         task_ids = []
 
-        for person_name, audio_file_path in voice_data:
-            task_id = await self.register_voice_async(person_name, audio_file_path)
+        self.logger.info(f"Starting batch voice registration for {len(voice_data)} voices")
+
+        for person_name, audio_input in voice_data:
+            task_id = await self.register_voice_async(person_name, audio_input)
             task_ids.append(task_id)
 
+        self.logger.info(f"Submitted {len(task_ids)} voice registration tasks")
         return task_ids
 
     async def batch_transcribe_files(self,
-                                     audio_files: List[str],
+                                     audio_inputs: List[Union[str, bytes, BinaryIO]],
                                      **kwargs) -> List[str]:
-        """批量异步转写音频文件"""
+        """
+        批量异步转写音频（支持混合输入类型）
+
+        Args:
+            audio_inputs: 音频输入列表（可以是混合类型）
+            **kwargs: 转写参数
+
+        Returns:
+            任务ID列表
+        """
         task_ids = []
 
-        for i, audio_file in enumerate(audio_files):
+        self.logger.info(f"Starting batch transcription for {len(audio_inputs)} files")
+
+        for i, audio_input in enumerate(audio_inputs):
             task_id = await self.transcribe_file_async(
-                audio_file,
+                audio_input,
                 priority=i + 1,  # 按顺序设置优先级
                 **kwargs
             )
             task_ids.append(task_id)
 
+        self.logger.info(f"Submitted {len(task_ids)} transcription tasks")
         return task_ids
+
+    # ==================== 便利方法 ====================
+
+    async def transcribe_from_bytes(self,
+                                    audio_bytes: bytes,
+                                    threshold: float = None,
+                                    auto_register_unknown: bool = True,
+                                    **kwargs) -> str:
+        """从字节数据转写音频"""
+        return await self.transcribe_file_async(
+            audio_bytes,
+            threshold=threshold,
+            auto_register_unknown=auto_register_unknown,
+            **kwargs
+        )
+
+    async def transcribe_from_file_object(self,
+                                          file_obj: BinaryIO,
+                                          threshold: float = None,
+                                          auto_register_unknown: bool = True,
+                                          **kwargs) -> str:
+        """从文件对象转写音频"""
+        return await self.transcribe_file_async(
+            file_obj,
+            threshold=threshold,
+            auto_register_unknown=auto_register_unknown,
+            **kwargs
+        )
+
+    async def register_voice_from_bytes(self, person_name: str, audio_bytes: bytes) -> str:
+        """从字节数据注册声纹"""
+        return await self.register_voice_async(person_name, audio_bytes)
+
+    async def register_voice_from_file_object(self, person_name: str, file_obj: BinaryIO) -> str:
+        """从文件对象注册声纹"""
+        return await self.register_voice_async(person_name, file_obj)
+
+    # ==================== 任务管理方法 ====================
 
     async def get_transcribe_result(self,
                                     task_id: str,
@@ -1443,13 +1564,17 @@ class VectorAsyncVoice2TextService:
         """等待所有任务完成并返回结果"""
         results = []
 
+        self.logger.info(f"Waiting for {len(task_ids)} tasks to complete")
+
         for task_id in task_ids:
             try:
                 result = await self.get_transcribe_result(task_id, timeout)
                 results.append(result)
             except Exception as e:
+                self.logger.error(f"Task {task_id} failed: {e}")
                 results.append({"error": str(e), "task_id": task_id})
 
+        self.logger.info(f"Completed waiting for {len(results)} results")
         return results
 
     async def get_task_progress(self, task_id: str) -> Dict[str, Any]:
@@ -1470,7 +1595,12 @@ class VectorAsyncVoice2TextService:
 
     async def cancel_task(self, task_id: str) -> bool:
         """取消任务"""
-        return await self.task_manager.cancel_task(task_id)
+        success = await self.task_manager.cancel_task(task_id)
+        if success:
+            self.logger.info(f"Task {task_id} cancelled successfully")
+        else:
+            self.logger.warning(f"Failed to cancel task {task_id}")
+        return success
 
     def get_service_stats(self) -> Dict[str, Any]:
         """获取服务统计信息"""
@@ -1480,34 +1610,14 @@ class VectorAsyncVoice2TextService:
         """列出活跃任务"""
         return self.task_manager.list_tasks(status_filter=TaskStatus.RUNNING)
 
-    # 向量数据库管理方法
-    async def backup_vector_database(self, backup_path: str) -> bool:
-        """备份向量数据库"""
-        try:
-            # 获取所有声纹记录
-            speakers = await self.voice_print_manager.vector_db.list_speakers()
-            backup_data = []
+    # ==================== 向量数据库管理方法 ====================
 
-            for speaker_id in speakers:
-                records = await self.voice_print_manager.vector_db.get_vectors_by_speaker(speaker_id)
-                for record in records:
-                    backup_data.append(record.to_dict())
-
-            # 保存到文件
-            import json
-            with open(backup_path, 'w', encoding='utf-8') as f:
-                json.dump(backup_data, f, ensure_ascii=False, indent=2, default=str)
-
-            print(f"向量数据库已备份到: {backup_path}")
-            return True
-
-        except Exception as e:
-            print(f"备份向量数据库失败: {e}")
-            return False
 
     async def restore_vector_database(self, backup_path: str) -> bool:
         """从备份恢复向量数据库"""
         try:
+            self.logger.info(f"Starting vector database restore from: {backup_path}")
+
             # 读取备份数据
             import json
             with open(backup_path, 'r', encoding='utf-8') as f:
@@ -1525,60 +1635,118 @@ class VectorAsyncVoice2TextService:
             if success:
                 # 重新加载缓存
                 await self.voice_print_manager._load_speaker_cache()
-                print(f"向量数据库已从备份恢复: {backup_path}")
+                self.logger.info(
+                    f"Vector database restore completed: {len(records)} records restored from {backup_path}")
                 return True
             else:
-                print("恢复向量数据库失败")
+                self.logger.error("Vector database restore failed during batch insert")
                 return False
 
         except Exception as e:
-            print(f"恢复向量数据库失败: {e}")
+            self.logger.error(f"Vector database restore failed: {e}")
             return False
 
-    # 保持与原始接口的兼容性
-    def _parse_filename(self, audio_file_path: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """解析文件名获取地点和时间信息"""
-        import os
-        from datetime import datetime
+    # ==================== 同步版本的便利方法 ====================
 
-        filename = os.path.basename(audio_file_path)
-        name_without_ext = os.path.splitext(filename)[0]
+    def transcribe_sync(self,
+                        audio_input: Union[str, bytes, BinaryIO],
+                        timeout: float = 300.0,
+                        **kwargs) -> Dict[str, Any]:
+        """
+        同步转写方法（阻塞直到完成）
 
-        # 尝试解析格式: 地点_日期_时间_名称
-        parts = name_without_ext.split('_')
-        if len(parts) >= 3:
-            location = parts[0]
-            date_str = parts[1]
-            time_str = parts[2]
+        Args:
+            audio_input: 音频输入
+            timeout: 超时时间
+            **kwargs: 转写参数
 
-            # 验证日期时间格式
-            try:
-                datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H%M%S")
-                # 转换为标准格式
-                formatted_date = f"{date_str[:4]}/{date_str[4:6]}/{date_str[6:8]}"
-                formatted_time = f"{time_str[:2]}:{time_str[2:4]}:{time_str[4:6]}"
-                return location, formatted_date, formatted_time
-            except ValueError:
-                pass
+        Returns:
+            转写结果
+        """
 
-        print(f"警告: 文件名 {filename} 不符合标准格式")
-        return None, None, None
+        async def _sync_transcribe():
+            task_id = await self.transcribe_file_async(audio_input, **kwargs)
+            return await self.get_transcribe_result(task_id, timeout)
+
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # 如果已经在异步环境中，抛出异常
+            raise RuntimeError("Cannot use sync method in async context. Use transcribe_file_async instead.")
+        else:
+            return loop.run_until_complete(_sync_transcribe())
+
+    def register_voice_sync(self,
+                            person_name: str,
+                            audio_input: Union[str, bytes, BinaryIO],
+                            timeout: float = 60.0) -> Tuple[str, str]:
+        """
+        同步注册声纹方法（阻塞直到完成）
+
+        Args:
+            person_name: 人名
+            audio_input: 音频输入
+            timeout: 超时时间
+
+        Returns:
+            (speaker_id, sample_id)
+        """
+
+        async def _sync_register():
+            task_id = await self.register_voice_async(person_name, audio_input)
+            return await self.task_manager.get_result(task_id, timeout)
+
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            raise RuntimeError("Cannot use sync method in async context. Use register_voice_async instead.")
+        else:
+            return loop.run_until_complete(_sync_register())
+
+    # ==================== 私有辅助方法 ====================
+
+    def _get_input_description(self, audio_input: Union[str, bytes, BinaryIO]) -> str:
+        """获取音频输入的描述"""
+        if isinstance(audio_input, str):
+            return f"file_path: {audio_input}"
+        elif isinstance(audio_input, bytes):
+            return f"bytes_data: {len(audio_input)} bytes"
+        elif hasattr(audio_input, 'read'):
+            name = getattr(audio_input, 'name', 'unknown')
+            return f"file_object: {name}"
+        else:
+            return f"unknown_type: {type(audio_input)}"
+
+    def _save_transcript_from_input(self, audio_input: Union[str, bytes, BinaryIO], transcript: str) -> str:
+        """根据音频输入类型保存转写结果"""
+        if isinstance(audio_input, str):
+            # 文件路径，使用原文件名
+            output_file = audio_input.rsplit(".", 1)[0] + "_transcript.txt"
+        else:
+            # 二进制数据或文件对象，生成新文件名
+            output_file = f"transcript_{uuid.uuid4().hex[:8]}.txt"
+
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(transcript)
+
+        self.logger.info(f"Transcript saved to: {output_file}")
+        return output_file
 
     def _format_single_speaker_output(self, text: str, duration: float,
                                       location: Optional[str], date: Optional[str],
                                       time: Optional[str]) -> str:
         """格式化单说话人输出"""
-        from datetime import datetime, timedelta
-
         start_time = "00:00:00"
         end_time = self._format_time(duration)
 
         if location and date and time:
-            file_datetime = datetime.strptime(f"{date} {time}", "%Y/%m/%d %H:%M:%S")
-            end_datetime = file_datetime + timedelta(seconds=duration)
-            new_start_time = file_datetime.strftime("%Y/%m/%d-%H:%M:%S")
-            new_end_time = end_datetime.strftime("%Y/%m/%d-%H:%M:%S")
-            return f"[{location}][{new_start_time}-{new_end_time}] [未知说话人] {text}"
+            try:
+                file_datetime = datetime.strptime(f"{date} {time}", "%Y/%m/%d %H:%M:%S")
+                end_datetime = file_datetime + timedelta(seconds=duration)
+                new_start_time = file_datetime.strftime("%Y/%m/%d-%H:%M:%S")
+                new_end_time = end_datetime.strftime("%Y/%m/%d-%H:%M:%S")
+                return f"[{location}][{new_start_time}-{new_end_time}] [未知说话人] {text}"
+            except ValueError as e:
+                self.logger.warning(f"Failed to parse datetime {date} {time}: {e}")
+                return f"[{start_time}-{end_time}] [未知说话人] {text}"
         else:
             return f"[{start_time}-{end_time}] [未知说话人] {text}"
 
@@ -1611,41 +1779,35 @@ class VectorAsyncVoice2TextService:
     def _format_output_segment(self, start_time: str, end_time: str, speaker_name: str,
                                text: str, file_location: str, file_date: str, file_time: str) -> str:
         """格式化输出段落"""
-        from datetime import datetime, timedelta
+        try:
+            start_sec = self._parse_time(start_time)
+            end_sec = self._parse_time(end_time)
 
-        start_sec = self._parse_time(start_time)
-        end_sec = self._parse_time(end_time)
+            file_datetime = datetime.strptime(f"{file_date} {file_time}", "%Y/%m/%d %H:%M:%S")
+            start_datetime = file_datetime + timedelta(seconds=start_sec)
+            end_datetime = file_datetime + timedelta(seconds=end_sec)
 
-        file_datetime = datetime.strptime(f"{file_date} {file_time}", "%Y/%m/%d %H:%M:%S")
-        start_datetime = file_datetime + timedelta(seconds=start_sec)
-        end_datetime = file_datetime + timedelta(seconds=end_sec)
+            new_start_time = start_datetime.strftime("%Y/%m/%d-%H:%M:%S")
+            new_end_time = end_datetime.strftime("%Y/%m/%d-%H:%M:%S")
 
-        new_start_time = start_datetime.strftime("%Y/%m/%d-%H:%M:%S")
-        new_end_time = end_datetime.strftime("%Y/%m/%d-%H:%M:%S")
+            return f"[{file_location}][{new_start_time}-{new_end_time}] [{speaker_name}] {text}"
+        except Exception as e:
+            self.logger.warning(f"Failed to format segment with datetime: {e}")
+            return f"[{start_time}-{end_time}] [{speaker_name}] {text}"
 
-        return f"[{file_location}][{new_start_time}-{new_end_time}] [{speaker_name}] {text}"
-
-    def _save_transcript(self, audio_file_path: str, transcript: str) -> str:
-        """保存转写结果"""
-        output_file = audio_file_path.rsplit(".", 1)[0] + "_transcript.txt"
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(transcript)
-        print(f"转写结果已保存到 {output_file}")
-        return output_file
-
-    def _print_auto_registered_info(self, auto_registered_speakers: Dict):
-        """打印自动注册信息"""
-        print("\n自动注册了以下未知说话人:")
+    def _log_auto_registered_info(self, auto_registered_speakers: Dict):
+        """记录自动注册信息"""
+        self.logger.info(f"Auto-registered {len(auto_registered_speakers)} unknown speakers:")
         for speaker_id, info in auto_registered_speakers.items():
-            print(f"  - 说话人ID: {speaker_id} (原始ID: {info['original_id']}, "
-                  f"音频长度: {info['audio_length']:.2f}秒)")
+            self.logger.info(f"  - Speaker ID: {speaker_id} (original: {info['original_id']}, "
+                             f"duration: {info['audio_length']:.2f}s)")
             if 'sample_id' in info:
-                print(f"    声纹样本ID: {info['sample_id']}")
+                self.logger.info(f"    Sample ID: {info['sample_id']}")
 
-        print("\n您可以使用 rename_voice_print_async 方法为这些自动注册的声纹分配人名。")
         if auto_registered_speakers:
             first_speaker = list(auto_registered_speakers.keys())[0]
-            print(f"例如: await service.rename_voice_print_async('{first_speaker}', '新人名')")
+            self.logger.info(
+                f"You can rename speakers using: await service.rename_voice_print_async('{first_speaker}', 'new_name')")
 
     @staticmethod
     def _format_time(seconds: float) -> str:
@@ -1664,14 +1826,14 @@ class VectorAsyncVoice2TextService:
         seconds = int(parts[2])
         return hours * 3600 + minutes * 60 + seconds
 
-    # 上下文管理器支持
+    # ==================== 上下文管理器支持 ====================
+
     async def __aenter__(self):
         await self.start()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.stop()
-
 
 # ============================================================================
 # 配置工厂扩展
@@ -1746,23 +1908,23 @@ async def main_vector_example():
 
     # 创建并使用向量异步服务
     async with VectorAsyncVoice2TextService(service_config) as service:
-        # # 注册声纹
-        # print("=== 注册声纹 ===")
-        # register_task_id = await service.register_voice_async(
-        #     "刘星",
-        #     "../../data/sample/刘星.mp3"
-        # )
-        #
-        # register_result = await service.get_transcribe_result(register_task_id)
-        # print(f"注册结果: {register_result}")
-        # register_task_id = await service.register_voice_async(
-        #     "刘梅",
-        #     "../../data/sample/刘梅.mp3"
-        # )
-        # register_task_id = await service.register_voice_async(
-        #     "夏东海",
-        #     "../../data/sample/夏东海.mp3"
-        # )
+        # 注册声纹
+        print("=== 注册声纹 ===")
+        register_task_id = await service.register_voice_async(
+            "刘星",
+            "../../data/sample/刘星.mp3"
+        )
+
+        register_result = await service.get_transcribe_result(register_task_id)
+        print(f"注册结果: {register_result}")
+        register_task_id = await service.register_voice_async(
+            "刘梅",
+            "../../data/sample/刘梅.mp3"
+        )
+        register_task_id = await service.register_voice_async(
+            "夏东海",
+            "../../data/sample/夏东海.mp3"
+        )
 
         # 列出已注册声纹
         print("\n=== 已注册声纹 ===")
