@@ -1,8 +1,10 @@
 import os
 from datetime import datetime, timedelta
 
-import librosa
+import librosa, whisper
 import pandas as pd
+import torch
+import torchaudio
 from funasr import AutoModel
 from speechbrain.inference import EncoderClassifier
 
@@ -12,7 +14,7 @@ from voice2text.tran.voiceprint_manager import VoicePrintManager
 DEFAULT_VOICE_PRINTS_PATH = os.path.join(os.path.expanduser("~"), ".cache", "voice_print")
 DEFAULT_VOICEPRINT_MAX_LENGTH = 30  # 默认声纹最大长度（秒）
 
-
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 class AudioProcessor:
     """处理音频文件操作"""
 
@@ -53,7 +55,10 @@ class ModelManager:
                  punc_model="ct-punc",
                  punc_model_revision="v2.0.4",
                  spk_model="cam++",
-                 spk_model_revision="v2.0.2"):
+                 spk_model_revision="v2.0.2",
+                 whisper_model_name="large-v3-turbo",
+                 align_model_name="jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
+                 diarize_model_path="pyannote/speaker-diarization-3.1"):
         self.device = device
 
         # FunASR模型参数
@@ -66,15 +71,99 @@ class ModelManager:
         self.spk_model = spk_model
         self.spk_model_revision = spk_model_revision
 
+        # Whisper模型参数
+        self.whisper_model_name = whisper_model_name
+        self.align_model_name = align_model_name
+        self.diarize_model_path = diarize_model_path
+
         self.asr_model = None
         self.speaker_encoder = None
 
     def load_all_models(self):
         """加载所有必要的模型"""
         print(f"Loading FunASR model: {self.funasr_model} with speaker model: {self.spk_model}...")
+        self._load_whisper_model()
+        self._load_diarize_model()
         self._load_funasr_model()
         self._load_speaker_encoder()
-        return (self.asr_model, self.speaker_encoder)
+        return (self.whisper_model, self.diarize_model, self.asr_model, self.speaker_encoder)
+
+    def _load_whisper_model(self):
+        """Load the Whisper speech recognition model"""
+
+        self.whisper_model = whisper.load_model(
+            self.whisper_model_name
+        ).to(self.device)
+
+        # import torch
+        # from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+
+
+        #
+        # model_id = self.whisper_model_name
+        #
+        # model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        #     model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True
+        # )
+        # model.to(device)
+        #
+        # processor = AutoProcessor.from_pretrained(model_id)
+        #
+        # self.whisper_model = pipeline(
+        #     "automatic-speech-recognition",
+        #     model=model,
+        #     tokenizer=processor.tokenizer,
+        #     feature_extractor=processor.feature_extractor,
+        #     torch_dtype=torch_dtype,
+        #     device=device,
+        # )
+
+    def _load_align_model(self):
+        """Load the alignment model for improving timestamp accuracy"""
+        print(f"Loading alignment model from: {self.align_model_name}")
+        try:
+            from whisperx import load_align_model
+            self.align_model, self.align_metadata = load_align_model(
+                "zh", device=self.device, model_name=self.align_model_name
+            )
+        except Exception as e:
+            print(f"Error loading alignment model: {e}")
+            self.align_model, self.align_metadata = None, None
+
+    def _load_diarize_model(self):
+        """Load the speaker diarization model"""
+        # print(f"Loading diarization model from: {self.diarize_model_path}")
+        # try:
+        #     # First attempt: Use WhisperX diarization
+        #     from whisperx.diarize import DiarizationPipeline
+        #     self.diarize_model = DiarizationPipeline(model_name=self.diarize_config_path)
+        #
+        #     # Test if model loaded correctly
+        #     if self.diarize_model is None:
+        #         raise Exception("DiarizationPipeline returned None")
+        #
+        # except Exception as e:
+        #     print(f"Error loading DiarizationPipeline: {e}")
+        #     print("Falling back to direct PyAnnote API...")
+        #
+        #     # Second attempt: Use PyAnnote directly
+        try:
+            from pyannote.audio import Pipeline
+            import torch
+
+            self.diarize_model = Pipeline.from_pretrained(self.diarize_model_path, use_auth_token=os.getenv("HF_TOKEN"))
+
+            if self.diarize_model is None:
+                raise Exception("Pipeline.from_pretrained returned None")
+
+            # Manually set device
+            if self.device != "cpu":
+                self.diarize_model.to(torch.device(self.device))
+
+        except Exception as e:
+            print(f"Error in fallback approach: {e}")
+            raise Exception(f"Failed to load diarization model: {e}")
+
 
     def _load_funasr_model(self):
         """加载FunASR语音识别模型"""
@@ -113,6 +202,23 @@ import os
 import soundfile as sf
 
 
+def preprocess_audio_in_memory(input_path, target_sample_rate=16000):
+    """在内存中预处理音频数据"""
+    waveform, sr = torchaudio.load(input_path)
+
+    # 重采样
+    if sr != target_sample_rate:
+        resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
+        waveform = resampler(waveform)
+
+    # 转换为单声道
+    if waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+    return {
+        "waveform": waveform,
+        "sample_rate": target_sample_rate
+    }
 class FunASRTranscriber:
     """使用FunASR进行转写并识别说话人的主类"""
 
@@ -120,6 +226,7 @@ class FunASRTranscriber:
                  model_manager=None, voice_print_manager=None,
                  voice_prints_path=DEFAULT_VOICE_PRINTS_PATH,
                  max_voiceprint_length=DEFAULT_VOICEPRINT_MAX_LENGTH,
+                 whisper_model_name="large-v3-turbo",
                  funasr_model="paraformer-zh",
                  funasr_model_revision="v2.0.4",
                  vad_model="fsmn-vad",
@@ -134,6 +241,7 @@ class FunASRTranscriber:
         if model_manager is None:
             model_manager = ModelManager(
                 device=device,
+                whisper_model_name="large-v3-turbo",
                 funasr_model=funasr_model,
                 funasr_model_revision=funasr_model_revision,
                 vad_model=vad_model,
@@ -145,7 +253,7 @@ class FunASRTranscriber:
             )
             # 加载所有模型
             self.models = model_manager.load_all_models()
-            self.asr_model, self.speaker_encoder = self.models
+            self.whisper_model, self.diarize_model, self.asr_model, self.speaker_encoder = self.models
         else:
             # 使用提供的模型管理器
             self.model_manager = model_manager
@@ -184,11 +292,25 @@ class FunASRTranscriber:
                         hotword='',
                         threshold=0.4,
                         auto_register_unknown=True,
+                        language="auto",
                         file_location=None,
                         file_date=None,
                         file_time=None):
         """转写音频文件并进行说话人识别，可选自动注册未知说话人
-        返回: (转写文本, 自动注册的说话人字典和音频样本, 音频时长秒数)
+
+        Args:
+            audio_file_path: 音频文件路径
+            batch_size_s: FunASR批处理大小（秒）
+            hotword: FunASR热词
+            threshold: 声纹匹配阈值
+            auto_register_unknown: 是否自动注册未知说话人
+            language: 语言设置，"auto"时使用Whisper，None或其他值使用FunASR
+            file_location: 文件地点信息
+            file_date: 文件日期信息
+            file_time: 文件时间信息
+
+        Returns:
+            dict: 包含转写文本、自动注册说话人、声纹音频样本、音频时长等信息
         """
         print(f"转写音频文件: {audio_file_path}...")
 
@@ -199,71 +321,79 @@ class FunASRTranscriber:
         else:
             use_filename_info = True
 
-        # 1. 使用FunASR进行转写和说话人分离
-        print("步骤1: 使用FunASR进行转写(包含说话人分离)...")
-        result = self.asr_model.generate(
-            input=audio_file_path,
-            batch_size_s=batch_size_s,
-            hotword=hotword
-        )
-
         # 初始化变量
         transcript = ""
         auto_registered_speakers = {}
         voiceprint_audio_samples = {}
-        audio_duration = 0.0  # 初始化音频时长
+        audio_duration = 0.0
 
-        # 检查是否有sentence_info字段（包含说话人分离信息）
-        if 'sentence_info' not in result[0]:
-            print("警告: FunASR结果不包含说话人分离信息(sentence_info字段)。")
-            print("使用完整转写文本，不包含说话人信息。")
-            # 提取文本和时间戳
-            full_text = result[0]['text']
-            timestamps = result[0].get('timestamp', [])
+        # 根据language参数选择转写引擎
+        if language == "auto":
+            print("步骤1: 使用Whisper进行转写...")
 
-            # 计算音频时长（如果没有时间戳，使用文本长度估算）
-            if timestamps:
-                audio_duration = timestamps[-1][1] / 1000.0  # 转换为秒
-            else:
-                audio_duration = len(full_text) / 10  # 简单估算
+            # 使用Whisper进行转写
+            result = self.whisper_model.transcribe(audio_file_path)
+            aligned_segments = result["segments"]
 
-            # 创建单一说话人的转写结果
-            if use_filename_info:
-                transcript = self._format_output_segment(
-                    "00:00:00",
-                    self._format_time(audio_duration),
-                    "未知说话人",
-                    full_text,
-                    file_location,
-                    file_date,
-                    file_time
-                )
-            else:
-                transcript = f"[00:00:00-{self._format_time(audio_duration)}] [未知说话人] {full_text}"
+            # 使用WhisperX进行时间戳对齐
+            # print("步骤2: 使用WhisperX进行时间戳对齐...")
+            # from whisperx import align
+            # aligned_segments = align(segments, self.align_model, self.align_metadata,
+            #                          audio_file_path, device="cpu")
 
-        else:
-            # 2. 从sentence_info中提取说话人分段信息
-            print("步骤2: 处理说话人分段信息...")
-            sentence_segments = result[0]['sentence_info']
-            print(f"发现 {len(sentence_segments)} 个说话人片段。")
+            # 执行说话人分离
+            print("步骤3: 执行说话人分离...")
+            diarize_segments = self.diarize_model(preprocess_audio_in_memory(audio_file_path))
 
-            # 计算音频总时长（取最后一个片段的结束时间）
-            audio_duration = max(seg['end'] for seg in sentence_segments) / 1000.0  # 转换为秒
+            # 计算音频总时长
+            if aligned_segments and len(aligned_segments) > 0:
+                audio_duration = max(seg.get('end', 0) for seg in aligned_segments)
 
-            # 将sentence_info转换为DataFrame格式，方便处理
+            # 将WhisperX结果转换为与FunASR兼容的格式
+            print("步骤4: 处理WhisperX分段信息...")
+
+            # 将aligned_segments转换为DataFrame格式，方便处理
             segments_data = []
-            for segment in sentence_segments:
+            for i, segment in enumerate(aligned_segments):
                 segments_data.append({
-                    'speaker': segment['spk'],
-                    'start': segment['start'] / 1000.0,  # 转换为秒
-                    'end': segment['end'] / 1000.0,  # 转换为秒
-                    'text': segment['text']
+                    'speaker': f'spk_{i}',  # 临时说话人ID，将通过diarization重新分配
+                    'start': segment.get('start', 0),
+                    'end': segment.get('end', 0),
+                    'text': segment.get('text', '').strip()
                 })
-            diarize_segments = pd.DataFrame(segments_data)
 
-            # 3. 使用新方法识别说话人身份，启用自动注册
+            # 合并diarization结果到segments
+            # 将diarization结果映射到aligned_segments
+            for seg_data in segments_data:
+                seg_start = seg_data['start']
+                seg_end = seg_data['end']
+
+                # 找到与当前segment时间重叠最多的diarization segment
+                best_match_speaker = None
+                max_overlap = 0
+
+                # 遍历diarization中的每个segment
+                for segment, _, speaker in diarize_segments.itertracks(yield_label=True):
+                    diar_start = segment.start
+                    diar_end = segment.end
+
+                    # 计算重叠时间
+                    overlap_start = max(seg_start, diar_start)
+                    overlap_end = min(seg_end, diar_end)
+                    overlap_duration = max(0, overlap_end - overlap_start)
+
+                    if overlap_duration > max_overlap:
+                        max_overlap = overlap_duration
+                        best_match_speaker = speaker
+
+                if best_match_speaker:
+                    seg_data['speaker'] = best_match_speaker
+
+            whisper_segments = pd.DataFrame(segments_data)
+
+            # 使用声纹管理器识别说话人身份
             speaker_mapping, auto_registered, voiceprint_samples = self.voice_print_manager.identify_speakers(
-                diarize_segments,
+                whisper_segments,
                 audio_file_path,
                 threshold=threshold,
                 auto_register=auto_register_unknown
@@ -271,22 +401,17 @@ class FunASRTranscriber:
             auto_registered_speakers = auto_registered
             voiceprint_audio_samples = voiceprint_samples
 
-            # 4. 格式化输出
-            print("步骤3: 格式化最终输出...")
+            # 格式化输出
+            print("步骤5: 格式化最终输出...")
             speaker_segments_formatted = []
 
-            for segment in sentence_segments:
-                # 获取时间和说话人信息
-                start_ms = segment['start']
-                end_ms = segment['end']
-                spk_id = segment['spk']
-                text = segment['text']
+            for _, segment_row in whisper_segments.iterrows():
+                start_time = self._format_time(segment_row['start'])
+                end_time = self._format_time(segment_row['end'])
+                spk_id = segment_row['speaker']
+                text = segment_row['text']
 
-                # 转换时间为秒并格式化
-                start_time = self._format_time(start_ms / 1000.0)
-                end_time = self._format_time(end_ms / 1000.0)
-
-                # 获取说话人身份（如果有映射）或使用通用标签
+                # 获取说话人身份
                 speaker_name = speaker_mapping.get(spk_id, f"Speaker_{spk_id}")
 
                 # 添加格式化的片段
@@ -307,6 +432,110 @@ class FunASRTranscriber:
 
             # 将片段连接成单个字符串
             transcript = " \n ".join(speaker_segments_formatted)
+
+        else:
+            # 使用原有的FunASR流程
+            print("步骤1: 使用FunASR进行转写(包含说话人分离)...")
+            result = self.asr_model.generate(
+                input=audio_file_path,
+                batch_size_s=batch_size_s,
+                hotword=hotword
+            )
+
+            # 检查是否有sentence_info字段（包含说话人分离信息）
+            if 'sentence_info' not in result[0]:
+                print("警告: FunASR结果不包含说话人分离信息(sentence_info字段)。")
+                print("使用完整转写文本，不包含说话人信息。")
+                # 提取文本和时间戳
+                full_text = result[0]['text']
+                timestamps = result[0].get('timestamp', [])
+
+                # 计算音频时长（如果没有时间戳，使用文本长度估算）
+                if timestamps:
+                    audio_duration = timestamps[-1][1] / 1000.0  # 转换为秒
+                else:
+                    audio_duration = len(full_text) / 10  # 简单估算
+
+                # 创建单一说话人的转写结果
+                if use_filename_info:
+                    transcript = self._format_output_segment(
+                        "00:00:00",
+                        self._format_time(audio_duration),
+                        "未知说话人",
+                        full_text,
+                        file_location,
+                        file_date,
+                        file_time
+                    )
+                else:
+                    transcript = f"[00:00:00-{self._format_time(audio_duration)}] [未知说话人] {full_text}"
+
+            else:
+                # 从sentence_info中提取说话人分段信息
+                print("步骤2: 处理说话人分段信息...")
+                sentence_segments = result[0]['sentence_info']
+                print(f"发现 {len(sentence_segments)} 个说话人片段。")
+
+                # 计算音频总时长（取最后一个片段的结束时间）
+                audio_duration = max(seg['end'] for seg in sentence_segments) / 1000.0  # 转换为秒
+
+                # 将sentence_info转换为DataFrame格式，方便处理
+                segments_data = []
+                for segment in sentence_segments:
+                    segments_data.append({
+                        'speaker': segment['spk'],
+                        'start': segment['start'] / 1000.0,  # 转换为秒
+                        'end': segment['end'] / 1000.0,  # 转换为秒
+                        'text': segment['text']
+                    })
+                diarize_segments = pd.DataFrame(segments_data)
+
+                # 使用新方法识别说话人身份，启用自动注册
+                speaker_mapping, auto_registered, voiceprint_samples = self.voice_print_manager.identify_speakers(
+                    diarize_segments,
+                    audio_file_path,
+                    threshold=threshold,
+                    auto_register=auto_register_unknown
+                )
+                auto_registered_speakers = auto_registered
+                voiceprint_audio_samples = voiceprint_samples
+
+                # 格式化输出
+                print("步骤3: 格式化最终输出...")
+                speaker_segments_formatted = []
+
+                for segment in sentence_segments:
+                    # 获取时间和说话人信息
+                    start_ms = segment['start']
+                    end_ms = segment['end']
+                    spk_id = segment['spk']
+                    text = segment['text']
+
+                    # 转换时间为秒并格式化
+                    start_time = self._format_time(start_ms / 1000.0)
+                    end_time = self._format_time(end_ms / 1000.0)
+
+                    # 获取说话人身份（如果有映射）或使用通用标签
+                    speaker_name = speaker_mapping.get(spk_id, f"Speaker_{spk_id}")
+
+                    # 添加格式化的片段
+                    if use_filename_info:
+                        formatted_segment = self._format_output_segment(
+                            start_time,
+                            end_time,
+                            speaker_name,
+                            text,
+                            file_location,
+                            file_date,
+                            file_time
+                        )
+                    else:
+                        formatted_segment = f"[{start_time}-{end_time}] [{speaker_name}] {text}"
+
+                    speaker_segments_formatted.append(formatted_segment)
+
+                # 将片段连接成单个字符串
+                transcript = " \n ".join(speaker_segments_formatted)
 
         # 保存输出到文件
         output_file = audio_file_path.rsplit(".", 1)[0] + "_transcript.txt"
@@ -334,7 +563,6 @@ class FunASRTranscriber:
             "audio_duration": audio_duration,
             "output_file": output_file
         }
-
     def _merge_same_speaker_segments(self, segments, max_gap_ms=3000):
         """合并相同说话人的短片段，用于提高声纹识别准确性
 
@@ -462,7 +690,7 @@ class FunASRTranscriber:
 def main():
     """主函数，演示使用方法"""
     # 配置
-    audio_file = "../../data/刘星家_20231212_122300_家有儿女吃饭.mp3"
+    audio_file = "../../data/dialect/无间道.mp3"
     device = "cpu"  # 如果有GPU可用，改为"cuda"
 
     # 创建转写器
@@ -470,6 +698,7 @@ def main():
         device=device,
         voice_prints_path=os.path.join(os.path.expanduser("~"), ".cache"),
         max_voiceprint_length=30,  # 限制声纹最大长度为30秒
+        whisper_model_name="large-v3-turbo",
         funasr_model="paraformer-zh",
         funasr_model_revision="v2.0.4",
         # funasr_model="dengcunqin/speech_paraformer_large_asr_mtl-16k-common-vocab11666-pytorch",
@@ -485,7 +714,7 @@ def main():
     )
 
     # 列出注册声纹
-    transcriber.clear_voice_prints()
+    # transcriber.clear_voice_prints()
     transcriber.list_registered_voices()
 
 
