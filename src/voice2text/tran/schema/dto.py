@@ -8,7 +8,7 @@ from enum import Enum
 from datetime import datetime
 import json
 
-from voice2text.tran.speech2text import STTAsyncVoice2TextService
+from voice2text.tran.schema.prints import SampleInfo
 
 # ============================================================================
 # 标准响应封装
@@ -136,12 +136,15 @@ class TranscribeResult:
     output_file: Optional[str] = None
 
 
+
 @dataclass
 class VoicePrintInfo:
     """声纹信息DTO"""
     speaker_id: str
-    sample_list: List[Dict]
-    total_duration: float
+    sample_list: List[SampleInfo]
+    named: bool = False
+
+
 
 
 @dataclass

@@ -1,86 +1,69 @@
+# ============================================================================
+# 使用示例
+# ============================================================================
 import asyncio
 
-from voice2text.tran.server import VoiceSDKServer
-from voice2text.tran.speech2text import VectorConfigFactory, VectorAsyncVoice2TextService, ConfigFactory
-from voice2text.tran.vector_base import VectorDBType
-import uvicorn
-#
-# if __name__ == "__main__":
-#     asr_config = ConfigFactory.create_funasr_config(
-#         model_name="paraformer-zh",
-#         device="cpu"
-#     )
-#
-#     speaker_config = ConfigFactory.create_speaker_config(
-#         threshold=0.5,
-#         device="cpu"
-#     )
-#
-#     # 向量数据库配置
-#     vector_db_config = {
-#         'persist_directory': './voice_print_vectors',
-#         'collection_name': 'production_voice_prints'
-#     }
-#
-#     # 创建向量服务配置
-#     service_config = VectorConfigFactory.create_vector_service_config(
-#         asr_config=asr_config,
-#         speaker_config=speaker_config,
-#         vector_db_type=VectorDBType.CHROMADB,
-#         vector_db_config=vector_db_config,
-#         max_transcribe_concurrent=2,
-#         max_speaker_concurrent=3,
-#         task_timeout=300.0
-#     )
-#
-#     # 启动FastAPI服务
-#     VoiceSDKServer(VectorAsyncVoice2TextService(service_config)).start()
+from voice2text.tran.client import VoiceSDKClient
 
 
-async def start_server():
-    # 1. 创建语音服务实例
-    asr_config = ConfigFactory.create_funasr_config(
-        model_name="paraformer-zh",
-        device="cpu"
-    )
+async def example_usage():
+    """SDK使用示例"""
 
-    speaker_config = ConfigFactory.create_speaker_config(
-        threshold=0.5,
-        device="cpu"
-    )
+    # 客户端使用示例
+    async with VoiceSDKClient(base_url="http://localhost:8765", timeout=600) as client:
+        # 1. 健康检查
+        # health = await client.health_check()
+        # print(f"服务状态: {health.message}")
+        # await client.rename_speaker("Speaker_68dc353b", "夏东海2")
+        # 注册声纹
+        #
+        # upload_voice = await client.upload_audio_file("../../data/sample/刘星.mp3", category="voiceprint")
+        # if upload_voice.success:
+        #     register_result = await client.register_voiceprint("刘星", upload_voice.data['file_id'])
+        #
+        #
+        # # 2. 上传音频文件
+        # upload_result = await client.upload_audio_file("../../data/刘星家_20231212_122300_家有儿女吃饭.mp3")
+        # if upload_result.success:
+        #     file_id = upload_result.data['file_id']
+        #     print(f"文件上传成功，文件ID: {file_id}")
+        #
+        #     # 3. 提交转写任务
+        #     transcribe_task = await client.transcribe_audio(file_id)
+        #     if transcribe_task.success:
+        #         task_id = transcribe_task.data['task_id']
+        #         print(f"转写任务已提交: {task_id}")
+        #
+        #         # 4. 等待任务完成
+        #         result = await client.wait_for_task_completion(task_id)
+        #         if result.success:
+        #             print(f"转写结果: {result.data['transcript']}")
+        #         else:
+        #             print(f"转写失败: {result.message}")
 
-    # 向量数据库配置
-    vector_db_config = {
-        'persist_directory': './voice_print_vectors',
-        'collection_name': 'production_voice_prints'
-    }
+        # r1 = await client.register_voiceprint_direct("刘星", "../../data/sample/刘星.mp3")
+        # print(f"声纹注册结果: {r1.message}, 数据: {r1.data}")
+        # r2 = await client.transcribe_file_direct("../../data/刘星家_20231212_122300_家有儿女吃饭.mp3")
+        # print(f"转写结果: {r2.message}, 数据: {r2.data}")
+        # 5. 获取声纹列表
+        # voiceprints = await client.list_voiceprints()
+        # if voiceprints.success:
+        #     print(f"已注册声纹: {voiceprints.data}")
 
-    # 创建向量服务配置
-    service_config = VectorConfigFactory.create_vector_service_config(
-        asr_config=asr_config,
-        speaker_config=speaker_config,
-        vector_db_type=VectorDBType.CHROMADB,
-        vector_db_config=vector_db_config,
-        max_transcribe_concurrent=2,
-        max_speaker_concurrent=3,
-        task_timeout=300.0
-    )
+        # await client.delete_speaker("刘星")
+        #
+        # await client.delete_speaker_audio_sample("夏东海2", "d178f549-d74e-4437-9538-d5b0e1f53853")
+        #
+        voiceprints = await client.list_voiceprints()
+        if voiceprints.success:
+            print(f"已注册声纹: {voiceprints.data}")
 
-    voice_service = VectorAsyncVoice2TextService(service_config)
-    await voice_service.start()
-    # 2. 创建并启动服务器
-    server = VoiceSDKServer(voice_service)
-
-    # 3. 使用uvicorn运行FastAPI应用
-    config = uvicorn.Config(
-        app=server.app,
-        host="0.0.0.0",
-        port=8765,
-        log_level="info"
-    )
-    server = uvicorn.Server(config)
-    await server.serve()
+        # await client.delete_speaker()
+        # await client.download_file("160a3e39-107e-4727-a371-eeff3b095eaf", "./刘星_sample5.")
 
 
 if __name__ == "__main__":
-    asyncio.run(start_server())
+
+
+    # 运行示例
+    asyncio.run(example_usage())

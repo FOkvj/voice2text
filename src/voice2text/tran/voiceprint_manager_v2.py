@@ -3,13 +3,14 @@
 # ============================================================================
 
 import tempfile
-from typing import Union, BinaryIO, Optional, Tuple
 
 import numpy as np
+from typing import Union, BinaryIO, Optional, Tuple
 
+from voice2text.tran.schema.dto import VoicePrintInfo
+from voice2text.tran.schema.prints import SampleInfo
 from voice2text.tran.vector_base import (
-    VectorDatabaseFactory, VectorDBType,
-    VectorDBConfigFactory, VectorDBConfig
+    VectorDatabaseFactory, VectorDBConfig
 )
 
 
@@ -338,6 +339,7 @@ class VectorEnhancedVoicePrintManager:
                 category="voiceprint",
                 metadata={
                     'speaker_id': person_name,
+                    'named': True,
                     'sample_number': int(sample_num),
                     'audio_duration': float(len(wav) / sr)
                 }
@@ -505,6 +507,7 @@ class VectorEnhancedVoicePrintManager:
             category="voiceprint",
             metadata={
                 'speaker_id': speaker_id,
+                'named': False,
                 'sample_number': 1,
                 'audio_duration': float(len(audio_data) / sr),
                 'original_speaker': str(original_speaker)
@@ -522,6 +525,7 @@ class VectorEnhancedVoicePrintManager:
             metadata={
                 'filename': filename,
                 'audio_file_id': file_id,
+                'named': False,
                 'original_speaker': str(original_speaker)
             }
         )
@@ -539,38 +543,27 @@ class VectorEnhancedVoicePrintManager:
         sample_id = f"{speaker_id}+sample1.wav"
         return speaker_id, sample_id
 
-    async def list_registered_voices(self, include_unnamed: bool = True) -> Dict:
+    async def list_registered_voices(self, include_unnamed: bool = True) -> List[VoicePrintInfo]:
         """列出所有注册的声纹"""
         try:
-            speakers_metadata = await self.vector_db.list_speakers()
-            named_voices = {}
-            unnamed_voices = {}
-
-            for speaker_id in speakers_metadata.keys():
-                if speaker_id.startswith("Speaker_"):
-                    unnamed_voices[speaker_id] = speakers_metadata[speaker_id]
-                else:
-                    named_voices[speaker_id] = speakers_metadata[speaker_id]
-
-            # 记录结果
-            if named_voices:
-                self.logger.info(f"Current registered named voiceprints ({len(named_voices)}):")
-                for i, (name, samples) in enumerate(named_voices.items(), 1):
-                    self.logger.info(f"  {i}. {name} ({len(samples)} samples)")
-
-            if include_unnamed and unnamed_voices:
-                self.logger.info(f"Current registered unnamed voiceprints ({len(unnamed_voices)}):")
-                for i, (speaker_id, samples) in enumerate(unnamed_voices.items(), 1):
-                    self.logger.info(f"  {i}. {speaker_id} ({len(samples)} samples)")
-
-            return {
-                "named_voice_prints": named_voices,
-                "unnamed_voice_prints": unnamed_voices if include_unnamed else {}
-            }
-
+            all_speakers =  await self.vector_db.list_speakers()
+            results = {}
+            if all_speakers and "metadatas" in all_speakers:
+                samples = all_speakers["metadatas"]
+                for sample_dict in samples:
+                    sample = SampleInfo(**sample_dict)
+                    speaker_id = sample.speaker_id
+                    named = sample.named
+                    if not include_unnamed and not named:
+                        continue
+                    if speaker_id in results:
+                        results[speaker_id].sample_list.append(sample)
+                    else:
+                        results[speaker_id] = VoicePrintInfo(speaker_id=speaker_id, named=named, sample_list=[sample])
+            return list(results.values())
         except Exception as e:
             self.logger.error(f"Error listing registered voices: {e}")
-            return {"named_voice_prints": {}, "unnamed_voice_prints": {}}
+            return {}
 
     async def rename_voice_print(self, old_speaker_id: str, new_name: str) -> bool:
         """重命名声纹"""
@@ -592,13 +585,13 @@ class VectorEnhancedVoicePrintManager:
                 # 更新向量记录
                 await self.vector_db.update_vector(
                     record.id,
-                    {'speaker_id': new_name}
+                    {'speaker_id': new_name, 'named': True}
                 )
 
                 # 更新文件元数据
                 await self.file_manager.metadata_storage.update(
                     record.id,
-                    {'metadata.speaker_id': new_name}
+                    {'metadata.speaker_id': new_name, 'metadata.named': True}
                 )
 
             # 更新缓存
@@ -873,7 +866,6 @@ async def create_vector_voiceprint_manager(
 
 async def example_usage():
     """使用示例"""
-    from voice2text.tran.vector_base import VectorDBType
 
     # 假设已有的组件（实际使用时需要创建真实的实例）
     speaker_model = None  # SpeakerModel instance

@@ -520,16 +520,7 @@ class ChromaDBImplementation(VectorDatabaseInterface):
     async def list_speakers(self) -> Dict[str, List]:
         """列出所有说话人ID"""
         try:
-            results = self.collection.get(include=['metadatas'])
-            meta_dict = {}
-            for meta in results['metadatas']:
-                speaker_id = meta['speaker_id']
-                if speaker_id not in meta_dict:
-                    meta_dict[speaker_id] = []
-                meta_dict[speaker_id].append(meta)
-            return meta_dict
-
-
+            return self.collection.get(include=['metadatas'])
         except Exception as e:
             self.logger.error(f"Failed to list speakers: {e}")
             return []

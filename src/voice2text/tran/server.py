@@ -351,21 +351,8 @@ class VoiceSDKServer:
         async def list_voiceprints(include_unnamed: bool = True):
             """获取声纹列表"""
             try:
-                voices = await self.voice_service.list_registered_voices_async(include_unnamed)
-                all_voices = {}
-                all_voices.update(voices["named_voice_prints"])
-                all_voices.update(voices["unnamed_voice_prints"])
-                # 转换为标准DTO
-                voiceprint_list = []
-                for speaker_id, samples in all_voices.items():
-                    voiceprint = VoicePrintInfo(
-                        speaker_id=speaker_id,
-                        sample_list=samples,
-                        total_duration=sum(s['audio_duration'] for s in samples)
-                    )
-                    voiceprint_list.append(voiceprint.__dict__)
-
-                return ApiResponse.success_response(voiceprint_list).to_dict()
+                voice_prints = await self.voice_service.list_registered_voices_async(include_unnamed)
+                return ApiResponse.success_response(voice_prints).to_dict()
 
             except Exception as e:
                 return ApiResponse.error_response(

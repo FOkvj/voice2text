@@ -15,6 +15,7 @@ import pandas as pd
 from typing import Dict, Any, Optional, Callable, Awaitable, Union, BinaryIO
 
 from voice2text.tran.filesystem import ImprovedFileManager, StorageConfig
+from voice2text.tran.schema.dto import VoicePrintInfo
 from voice2text.tran.vector_base import VectorDBConfig
 
 
@@ -1121,7 +1122,7 @@ class STTAsyncVoice2TextService:
 
 
 
-    async def list_registered_voices_async(self, include_unnamed: bool = True) -> Dict:
+    async def list_registered_voices_async(self, include_unnamed: bool = True) -> List[VoicePrintInfo]:
         """异步列出注册的声纹"""
         return await self.voice_print_manager.list_registered_voices(include_unnamed)
 
