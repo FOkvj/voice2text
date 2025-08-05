@@ -11,6 +11,7 @@ import json
 from voice2text.tran.filesystem import StorageType, S3StorageConfig
 from voice2text.tran.schema.dto import ServiceStatus, ApiResponse, ResponseCode, FileUploadResult, TranscribeRequest, \
     TaskInfo, TranscribeResult, VoiceprintRegisterRequest, VoicePrintInfo, SpeakerStatistics
+from voice2text.tran.schema.prints import SampleInfo
 from voice2text.tran.speech2text import STTAsyncVoice2TextService, STTConfigFactory
 
 # ============================================================================
@@ -330,13 +331,13 @@ class VoiceSDKServer:
                     ).to_dict()
 
                 # 提交声纹注册任务
-                person_name, speaker_id = await self.voice_service.register_voice_async(
+                sample_info: SampleInfo = await self.voice_service.register_voice_async(
                     request.person_name,
                     input_data
                 )
 
                 return ApiResponse.success_response(
-                    {"speaker_id": speaker_id, "person_name": person_name},
+                    sample_info,
                     "声纹注册任务已提交",
                     code=ResponseCode.ACCEPTED.value
                 ).to_dict()

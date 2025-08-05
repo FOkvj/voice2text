@@ -41,8 +41,8 @@ async def example_usage():
         #         else:
         #             print(f"转写失败: {result.message}")
 
-        # r1 = await client.register_voiceprint_direct("刘星", "../../data/sample/刘星.mp3")
-        # print(f"声纹注册结果: {r1.message}, 数据: {r1.data}")
+        r1 = await client.register_voiceprint_direct("刘星", "../../data/sample/刘星.mp3")
+        print(f"声纹注册结果: {r1.message}, 数据: {r1.data}")
         # r2 = await client.transcribe_file_direct("../../data/刘星家_20231212_122300_家有儿女吃饭.mp3")
         # print(f"转写结果: {r2.message}, 数据: {r2.data}")
         # 5. 获取声纹列表

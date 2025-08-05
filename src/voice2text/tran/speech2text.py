@@ -16,6 +16,7 @@ from typing import Dict, Any, Optional, Callable, Awaitable, Union, BinaryIO
 
 from voice2text.tran.filesystem import ImprovedFileManager, StorageConfig
 from voice2text.tran.schema.dto import VoicePrintInfo
+from voice2text.tran.schema.prints import SampleInfo
 from voice2text.tran.vector_base import VectorDBConfig
 
 
@@ -1114,7 +1115,7 @@ class STTAsyncVoice2TextService:
 
     async def register_voice_async(self,
                                    person_name: str,
-                                   audio_input: Union[str, bytes, BinaryIO]) -> Tuple[str, str]:
+                                   audio_input: Union[str, bytes, BinaryIO]) -> SampleInfo:
         """异步注册声纹（支持多种输入格式）"""
 
 

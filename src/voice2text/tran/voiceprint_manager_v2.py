@@ -293,7 +293,7 @@ class VectorEnhancedVoicePrintManager:
     async def register_voice(self,
                              person_name: str,
                              audio_input: Union[str, bytes, BinaryIO],
-                             cleanup_temp: bool = True) -> Tuple[str, str]:
+                             cleanup_temp: bool = True) -> SampleInfo:
         """
         注册新声纹到向量数据库
 
@@ -352,9 +352,11 @@ class VectorEnhancedVoicePrintManager:
                 embedding=embedding,
                 sample_number=sample_num,
                 audio_duration=len(wav) / sr,
-                created_at=datetime.now(),
+                created_at=str(datetime.now()),
                 metadata={
                     'filename': filename,
+                    'named': True,
+                    'original_speaker': person_name,
                     'audio_file_id': file_id
                 }
             )
@@ -371,8 +373,22 @@ class VectorEnhancedVoicePrintManager:
 
             sample_id = f"{person_name}+sample{sample_num}.wav"
             self.logger.info(f"Voice registration successful for {person_name}, sample ID: {sample_id}")
-
-            return person_name, sample_id
+            # audio_duration: float
+            # audio_file_id: str
+            # created_at: str
+            # filename: str
+            # named: bool
+            # original_speaker: str
+            # sample_number: int
+            # speaker_id: str
+            return SampleInfo(speaker_id=person_name,
+                              audio_file_id=file_id,
+                              audio_duration=vector_record.audio_duration,
+                              created_at=vector_record.created_at,
+                              filename=filename,
+                              named=True,
+                              original_speaker=person_name,
+                              sample_number=sample_num)
 
         except Exception as e:
             self.logger.error(f"Voice registration failed for {person_name}: {e}")
@@ -521,7 +537,7 @@ class VectorEnhancedVoicePrintManager:
             embedding=embedding,
             sample_number=1,
             audio_duration=len(audio_data) / sr,
-            created_at=datetime.now(),
+            created_at=str(datetime.now()),
             metadata={
                 'filename': filename,
                 'audio_file_id': file_id,

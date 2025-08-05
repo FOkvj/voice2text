@@ -11,6 +11,7 @@ import httpx
 
 from voice2text.tran.schema.dto import ApiResponse, ServiceStatus, FileUploadResult, ResponseCode, TranscribeRequest, \
     TaskInfo, VoiceprintRegisterRequest, SpeakerStatistics, TranscribeResult, VoicePrintInfo
+from voice2text.tran.schema.prints import SampleInfo
 
 
 class VoiceSDKClient:
@@ -237,7 +238,7 @@ class VoiceSDKClient:
             self,
             person_name: str,
             file_path: str,
-    ) -> ApiResponse[Dict]:
+    ) -> ApiResponse[SampleInfo]:
         """
         直接注册声纹：上传 -> 注册 一键完成
 
@@ -265,15 +266,7 @@ class VoiceSDKClient:
                 )
 
                 if register_result.success:
-                    return ApiResponse.success_response(
-                        {
-                            "speaker_id": register_result.data['speaker_id'],
-                            "person_name": register_result.data['person_name'],
-                            "file_id": file_id,
-                            "original_filename": Path(file_path).name
-                        },
-                        "声纹注册成功"
-                    )
+                    return register_result
                 else:
                     # 注册失败，清理上传的文件
                     await self.delete_file(file_id)
@@ -318,7 +311,7 @@ class VoiceSDKClient:
         return await self._make_request('POST', '/api/v1/audio/transcribe', json=request_data)
 
     async def register_voiceprint(self, person_name: str, audio_file_id: str) -> \
-    ApiResponse[Dict]:
+    ApiResponse[SampleInfo]:
         """
         注册声纹
 

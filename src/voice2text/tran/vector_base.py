@@ -69,7 +69,7 @@ class VoicePrintRecord:
     embedding: np.ndarray
     sample_number: int
     audio_duration: float
-    created_at: datetime
+    created_at: str
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -80,7 +80,7 @@ class VoicePrintRecord:
             'embedding': self.embedding.tolist(),
             'sample_number': self.sample_number,
             'audio_duration': self.audio_duration,
-            'created_at': self.created_at.isoformat(),
+            'created_at': self.created_at,
             'metadata': self.metadata
         }
 
@@ -288,7 +288,7 @@ class ChromaDBImplementation(VectorDatabaseInterface):
                 'speaker_id': record.speaker_id,
                 'sample_number': record.sample_number,
                 'audio_duration': record.audio_duration,
-                'created_at': record.created_at.isoformat(),
+                'created_at': record.created_at,
                 **record.metadata
             }
 
