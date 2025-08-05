@@ -3,24 +3,19 @@
 # ============================================================================
 
 import asyncio
-import hashlib
-import json
 import logging
-import os
-import shutil
 import time
 import uuid
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
-from typing import Dict, Any, Optional, Callable, Awaitable, Union, BinaryIO
-from typing import List
 
 import pandas as pd
+from typing import Dict, Any, Optional, Callable, Awaitable, Union, BinaryIO
 
-from voice2text.tran.filesystem import ImprovedFileManager
+from voice2text.tran.filesystem import ImprovedFileManager, StorageConfig
+from voice2text.tran.vector_base import VectorDBConfig
 
 
 class ASRModelType(Enum):
@@ -243,21 +238,29 @@ class ModelFactory:
         cls._speaker_models[model_type] = model_class
 
 @dataclass
-class ServiceConfig:
-    """服务整体配置"""
+class STTServiceConfig:
+    """集成向量数据库的服务配置"""
     # ASR配置
-    asr_config: ModelConfig
+    asr_config: Any  # ModelConfig
 
     # 说话人识别配置
-    speaker_config: SpeakerConfig
+    speaker_config: Any  # SpeakerConfig
 
-    # 文件管理配置
-    voice_prints_path: str = os.path.join(os.path.expanduser("~"), ".cache", "voice_prints")
-    temp_dir: str = os.path.join(os.path.expanduser("~"), ".cache", "temp")
+    # 向量数据库配置
+    vector_db_config:VectorDBConfig
+
+    # 文件存储配置
+    storage_config: StorageConfig  # S3配置（如果使用S3存储）
 
     # 音频处理配置
     target_sr: int = 16000
     batch_size_s: int = 300
+
+    # 异步任务配置
+    max_transcribe_concurrent: int = 2
+    max_speaker_concurrent: int = 3
+    task_timeout: float = 300.0
+    enable_task_logging: bool = True
 
     # 分布式配置
     instance_id: Optional[str] = None
@@ -275,227 +278,6 @@ class WhisperConfig(ModelConfig):
 
 
 
-
-class ConfigFactory:
-    """配置工厂"""
-
-    @staticmethod
-    def create_funasr_config(
-            model_name: str = "paraformer-zh",
-            model_revision: str = "v2.0.4",
-            device: str = "cpu"
-    ) -> FunASRConfig:
-        """创建FunASR配置"""
-        return FunASRConfig(
-            model_type=ASRModelType.FUNASR.value,
-            model_name=model_name,
-            model_revision=model_revision,
-            device=device
-        )
-
-    @staticmethod
-    def create_whisper_config(
-            model_name: str = "base",
-            device: str = "cpu",
-            language: Optional[str] = None
-    ) -> WhisperConfig:
-        """创建Whisper配置"""
-        return WhisperConfig(
-            model_type=ASRModelType.WHISPER.value,
-            model_name=model_name,
-            device=device,
-            language=language
-        )
-
-    @staticmethod
-    def create_speaker_config(
-            model_type: SpeakerModelType = SpeakerModelType.ECAPA_TDNN,
-            device: str = "cpu",
-            threshold: float = 0.4
-    ) -> SpeakerConfig:
-        """创建说话人识别配置"""
-        return SpeakerConfig(
-            model_type=model_type.value,
-            model_name="speechbrain/spkrec-ecapa-voxceleb",
-            device=device,
-            threshold=threshold
-        )
-
-    @staticmethod
-    def create_service_config(
-            asr_config: ModelConfig,
-            speaker_config: SpeakerConfig,
-            voice_prints_path: Optional[str] = None,
-            instance_id: Optional[str] = None
-    ) -> ServiceConfig:
-        """创建服务配置"""
-        if voice_prints_path is None:
-            voice_prints_path = os.path.join(os.path.expanduser("~"), ".cache", "voice_prints")
-
-        return ServiceConfig(
-            asr_config=asr_config,
-            speaker_config=speaker_config,
-            voice_prints_path=voice_prints_path,
-            instance_id=instance_id
-        )
-
-
-class FileManager:
-    """文件管理器"""
-
-    def __init__(self, base_dir: str, temp_dir: Optional[str] = None):
-        self.base_dir = Path(base_dir)
-        self.temp_dir = Path(temp_dir or os.path.join(base_dir, "temp"))
-
-        # 创建必要目录
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
-
-        # 元数据文件
-        self.metadata_file = self.base_dir / "file_metadata.json"
-        self._load_metadata()
-
-    def _load_metadata(self):
-        """加载文件元数据"""
-        if self.metadata_file.exists():
-            with open(self.metadata_file, 'r', encoding='utf-8') as f:
-                self.metadata = json.load(f)
-        else:
-            self.metadata = {}
-
-    def _save_metadata(self):
-        """保存文件元数据"""
-        # 转换numpy类型为Python原生类型
-        serializable_metadata = self._convert_to_serializable(self.metadata)
-
-        with open(self.metadata_file, 'w', encoding='utf-8') as f:
-            json.dump(serializable_metadata, f, ensure_ascii=False, indent=2)
-
-    def _convert_to_serializable(self, obj):
-        """递归转换对象为JSON可序列化的格式"""
-        import numpy as np
-
-        if isinstance(obj, dict):
-            return {key: self._convert_to_serializable(value) for key, value in obj.items()}
-        elif isinstance(obj, list):
-            return [self._convert_to_serializable(item) for item in obj]
-        elif isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif hasattr(obj, 'item'):  # numpy标量
-            return obj.item()
-        else:
-            return obj
-
-    def _calculate_hash(self, file_path: Path) -> str:
-        """计算文件哈希"""
-        hash_md5 = hashlib.md5()
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hash_md5.update(chunk)
-        return hash_md5.hexdigest()
-
-    def save_file(self,
-                  data: Union[bytes, BinaryIO],
-                  filename: str,
-                  category: str = "general",
-                  metadata: Optional[Dict] = None) -> str:
-        """
-        保存文件
-
-        Args:
-            data: 文件数据或文件对象
-            filename: 文件名
-            category: 文件分类
-            metadata: 附加元数据
-
-        Returns:
-            文件ID
-        """
-        file_id = str(uuid.uuid4())
-        category_dir = self.base_dir / category
-        category_dir.mkdir(exist_ok=True)
-
-        # 保存文件
-        file_path = category_dir / f"{file_id}_{filename}"
-
-        if isinstance(data, bytes):
-            with open(file_path, 'wb') as f:
-                f.write(data)
-        else:
-            with open(file_path, 'wb') as f:
-                shutil.copyfileobj(data, f)
-
-        # 记录元数据
-        file_hash = self._calculate_hash(file_path)
-
-        # 确保所有数据都是可序列化的
-        clean_metadata = self._convert_to_serializable(metadata or {})
-
-        self.metadata[file_id] = {
-            'filename': filename,
-            'category': category,
-            'path': str(file_path.relative_to(self.base_dir)),
-            'size': int(file_path.stat().st_size),  # 确保是int类型
-            'hash': file_hash,
-            'created_at': datetime.now().isoformat(),
-            'metadata': clean_metadata
-        }
-
-        self._save_metadata()
-        return file_id
-
-    def get_file_path(self, file_id: str) -> Optional[Path]:
-        """获取文件路径"""
-        if file_id not in self.metadata:
-            return None
-
-        rel_path = self.metadata[file_id]['path']
-        full_path = self.base_dir / rel_path
-
-        if full_path.exists():
-            return full_path
-        return None
-
-    def delete_file(self, file_id: str) -> bool:
-        """删除文件"""
-        if file_id not in self.metadata:
-            return False
-
-        file_path = self.get_file_path(file_id)
-        if file_path and file_path.exists():
-            file_path.unlink()
-
-        del self.metadata[file_id]
-        self._save_metadata()
-        return True
-
-    def list_files(self, category: Optional[str] = None) -> List[Dict]:
-        """列出文件"""
-        files = []
-        for file_id, info in self.metadata.items():
-            if category is None or info['category'] == category:
-                files.append({
-                    'file_id': file_id,
-                    **info
-                })
-        return files
-
-    def cleanup_temp_files(self, max_age_hours: int = 24):
-        """清理临时文件"""
-        import time
-        current_time = time.time()
-        max_age_seconds = max_age_hours * 3600
-
-        for file_path in self.temp_dir.iterdir():
-            if file_path.is_file():
-                file_age = current_time - file_path.stat().st_mtime
-                if file_age > max_age_seconds:
-                    file_path.unlink()
-                    print(f"Cleaned up temp file: {file_path}")
 
 
 
@@ -1022,7 +804,6 @@ class VoiceTaskManager(AsyncTaskManager):
 
 import asyncio
 import os
-from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
 from voice2text.tran.voiceprint_manager_v2 import (
@@ -1031,46 +812,13 @@ from voice2text.tran.voiceprint_manager_v2 import (
 from voice2text.tran.vector_base import VectorDBType
 
 
-@dataclass
-class VectorServiceConfig:
-    """集成向量数据库的服务配置"""
-    # ASR配置
-    asr_config: Any  # ModelConfig
-
-    # 说话人识别配置
-    speaker_config: Any  # SpeakerConfig
-
-    # 向量数据库配置
-    vector_db_type: VectorDBType = VectorDBType.CHROMADB
-    vector_db_config: Dict[str, Any] = field(default_factory=dict)
-
-    # 文件管理配置
-    voice_prints_path: str = os.path.join(os.path.expanduser("~"), ".cache", "voice_prints")
-    temp_dir: str = os.path.join(os.path.expanduser("~"), ".cache", "temp")
-
-    # 新增：存储配置
-    storage_type: str = "local"  # "local" 或 "s3"
-    s3_config: Optional[Dict[str, Any]] = None  # S3配置（如果使用S3存储）
-
-    # 音频处理配置
-    target_sr: int = 16000
-    batch_size_s: int = 300
-
-    # 异步任务配置
-    max_transcribe_concurrent: int = 2
-    max_speaker_concurrent: int = 3
-    task_timeout: float = 300.0
-    enable_task_logging: bool = True
-
-    # 分布式配置
-    instance_id: Optional[str] = None
-    cluster_config: Optional[Dict[str, Any]] = None
 
 
-class VectorAsyncVoice2TextService:
+
+class STTAsyncVoice2TextService:
     """集成向量数据库的异步语音转文字服务 - 支持多种音频输入格式"""
 
-    def __init__(self, config):
+    def __init__(self, config: STTServiceConfig):
         self.config = config
         self.logger = logging.getLogger(f"{__name__}.VectorAsyncVoice2TextService")
 
@@ -1082,36 +830,18 @@ class VectorAsyncVoice2TextService:
         self.task_manager = None
 
         # 存储配置
-        self.storage_config = self._create_storage_config()
+        self.storage_config = config.storage_config
 
         # 音频处理器
         self.audio_handler = None
 
-    def _create_storage_config(self):
-        """创建存储配置"""
-        storage_type = getattr(self.config, 'storage_type', 'local')
-
-        if storage_type == 'local':
-            # 假设存在LocalStorageConfig类
-            from voice2text.tran.filesystem import LocalStorageConfig
-            return LocalStorageConfig(
-                base_dir=self.config.voice_prints_path,
-                temp_dir=self.config.temp_dir
-            )
-        elif storage_type == 's3':
-            # 假设存在S3StorageConfig类
-            from voice2text.tran.filesystem import S3StorageConfig
-            s3_config = getattr(self.config, 's3_config', {})
-            return S3StorageConfig(**s3_config)
-        else:
-            raise ValueError(f"Unsupported storage type: {storage_type}")
 
     async def initialize(self):
         """异步初始化服务"""
         self.logger.info("Initializing VectorAsyncVoice2TextService...")
 
         # 初始化音频处理器
-        self.audio_handler = AudioInputHandler(self.config.temp_dir)
+        self.audio_handler = AudioInputHandler()
 
         # 初始化文件管理器
         await self._initialize_file_manager()
@@ -1166,22 +896,14 @@ class VectorAsyncVoice2TextService:
         self.logger.info("Initializing vector-enhanced voiceprint manager...")
 
         # 准备向量数据库配置
-        vector_db_config = self.config.vector_db_config.copy()
-
-        # 设置默认持久化目录（对于ChromaDB）
-        if self.config.vector_db_type == VectorDBType.CHROMADB:
-            if 'persist_directory' not in vector_db_config:
-                vector_db_config['persist_directory'] = os.path.join(
-                    self.config.voice_prints_path, 'vector_db'
-                )
+        vector_db_config = self.config.vector_db_config
 
         # 创建向量增强的声纹管理器
         self.voice_print_manager = await create_vector_voiceprint_manager(
             speaker_model=self.speaker_model,
             file_manager=self.file_manager,
             config=self.config.speaker_config,
-            vector_db_config=vector_db_config,
-            db_type=self.config.vector_db_type
+            vector_db_config=vector_db_config
         )
 
         self.logger.info("Vector-enhanced voiceprint manager initialized")
@@ -1292,7 +1014,7 @@ class VectorAsyncVoice2TextService:
         file_time = kwargs.get('file_time', '未知时间')
 
         # 准备音频文件路径（ASR模型可能需要文件路径）
-        async with AudioInputHandler(self.config.temp_dir) as audio_handler:
+        async with AudioInputHandler() as audio_handler:
             audio_file_path, is_temp = audio_handler.prepare_audio_input(
                 audio_input, self.config.target_sr
             )
@@ -1428,7 +1150,7 @@ class VectorAsyncVoice2TextService:
             input_desc = self._get_input_description(audio_input)
             self.logger.info(f"Searching similar voices for: {input_desc}")
 
-            async with AudioInputHandler(self.config.temp_dir) as audio_handler:
+            async with AudioInputHandler() as audio_handler:
                 # 加载音频并提取特征
                 wav, sr = audio_handler.load_audio_data(audio_input, self.config.target_sr)
 
@@ -1838,32 +1560,70 @@ class VectorAsyncVoice2TextService:
 # 配置工厂扩展
 # ============================================================================
 
-class VectorConfigFactory:
-    """向量服务配置工厂"""
+class STTConfigFactory:
+    """服务配置工厂"""
 
     @staticmethod
-    def create_vector_service_config(
+    def create_funasr_config(
+            model_name: str = "paraformer-zh",
+            model_revision: str = "v2.0.4",
+            device: str = "cpu"
+    ) -> FunASRConfig:
+        """创建FunASR配置"""
+        return FunASRConfig(
+            model_type=ASRModelType.FUNASR.value,
+            model_name=model_name,
+            model_revision=model_revision,
+            device=device
+        )
+
+    @staticmethod
+    def create_whisper_config(
+            model_name: str = "base",
+            device: str = "cpu",
+            language: Optional[str] = None
+    ) -> WhisperConfig:
+        """创建Whisper配置"""
+        return WhisperConfig(
+            model_type=ASRModelType.WHISPER.value,
+            model_name=model_name,
+            device=device,
+            language=language
+        )
+
+    @staticmethod
+    def create_speaker_config(
+            model_type: SpeakerModelType = SpeakerModelType.ECAPA_TDNN,
+            device: str = "cpu",
+            threshold: float = 0.4
+    ) -> SpeakerConfig:
+        """创建说话人识别配置"""
+        return SpeakerConfig(
+            model_type=model_type.value,
+            model_name="speechbrain/spkrec-ecapa-voxceleb",
+            device=device,
+            threshold=threshold
+        )
+
+    @staticmethod
+    def create_stt_service_config(
             asr_config,
             speaker_config,
-            vector_db_type: VectorDBType = VectorDBType.CHROMADB,
-            vector_db_config: Optional[Dict[str, Any]] = None,
-            voice_prints_path: Optional[str] = None,
+            vector_db_config: VectorDBConfig,
+            storage_config: StorageConfig,
             **kwargs
-    ) -> VectorServiceConfig:
+    ) -> STTServiceConfig:
         """创建向量服务配置"""
 
-        if voice_prints_path is None:
-            voice_prints_path = os.path.join(os.path.expanduser("~"), ".cache", "voice_prints")
 
         if vector_db_config is None:
             vector_db_config = {}
 
-        return VectorServiceConfig(
+        return STTServiceConfig(
             asr_config=asr_config,
             speaker_config=speaker_config,
-            vector_db_type=vector_db_type,
             vector_db_config=vector_db_config,
-            voice_prints_path=voice_prints_path,
+            storage_config=storage_config,
             **kwargs
         )
 
@@ -1872,18 +1632,18 @@ class VectorConfigFactory:
 # 使用示例
 # ============================================================================
 
-async def main_vector_example():
+async def main_stt_example():
     """向量数据库版本的使用示例"""
 
     # 创建配置（需要根据实际情况调整导入）
     # from your_original_file import ConfigFactory  # 需要从原文件导入
 
-    asr_config = ConfigFactory.create_funasr_config(
+    asr_config = STTConfigFactory.create_funasr_config(
         model_name="paraformer-zh",
         device="cpu"
     )
 
-    speaker_config = ConfigFactory.create_speaker_config(
+    speaker_config = STTConfigFactory.create_speaker_config(
         threshold=0.5,
         device="cpu"
     )
@@ -1895,7 +1655,7 @@ async def main_vector_example():
     }
 
     # 创建向量服务配置
-    service_config = VectorConfigFactory.create_vector_service_config(
+    service_config = STTConfigFactory.create_stt_service_config(
         asr_config=asr_config,
         speaker_config=speaker_config,
         vector_db_type=VectorDBType.CHROMADB,
@@ -1906,7 +1666,7 @@ async def main_vector_example():
     )
 
     # 创建并使用向量异步服务
-    async with VectorAsyncVoice2TextService(service_config) as service:
+    async with STTAsyncVoice2TextService(service_config) as service:
         # 注册声纹
         print("=== 注册声纹 ===")
         register_task_id = await service.register_voice_async(
@@ -1969,4 +1729,4 @@ async def main_vector_example():
 if __name__ == "__main__":
     # 运行向量数据库示例
     print("=== 向量数据库版本示例 ===")
-    asyncio.run(main_vector_example())
+    asyncio.run(main_stt_example())

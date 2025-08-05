@@ -9,7 +9,7 @@ import numpy as np
 
 from voice2text.tran.vector_base import (
     VectorDatabaseFactory, VectorDBType,
-    VectorDBConfigFactory
+    VectorDBConfigFactory, VectorDBConfig
 )
 
 
@@ -833,8 +833,7 @@ async def create_vector_voiceprint_manager(
         speaker_model,
         file_manager,
         config,
-        vector_db_config: Optional[Dict[str, Any]] = None,
-        db_type: VectorDBType = VectorDBType.CHROMADB
+        vector_db_config: VectorDBConfig,
 ) -> VectorEnhancedVoicePrintManager:
     """
     创建基于向量数据库的声纹管理器
@@ -850,22 +849,8 @@ async def create_vector_voiceprint_manager(
         VectorEnhancedVoicePrintManager实例
     """
 
-    # 默认配置
-    if vector_db_config is None:
-        vector_db_config = {}
-
-    # 创建向量数据库配置
-    if db_type == VectorDBType.CHROMADB:
-        db_config = VectorDBConfigFactory.create_chromadb_config(
-            **vector_db_config
-        )
-    elif db_type == VectorDBType.MILVUS:
-        db_config = VectorDBConfigFactory.create_milvus_config(**vector_db_config)
-    else:
-        raise ValueError(f"Unsupported database type: {db_type}")
-
     # 创建向量数据库实例
-    vector_db = VectorDatabaseFactory.create_database(db_type, db_config)
+    vector_db = VectorDatabaseFactory.create_database(vector_db_config)
 
     # 连接数据库
     await vector_db.connect()
@@ -908,7 +893,6 @@ async def example_usage():
             file_manager=file_manager,
             config=config,
             vector_db_config=vector_db_config,
-            db_type=VectorDBType.CHROMADB
         )
 
         async with manager:

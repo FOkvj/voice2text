@@ -1043,14 +1043,60 @@ async def example_usage():
         print(f"Saved file with ID: {file_id}")
 
         # 获取文件
-        content = await file_manager.load_file(file_id)
-        print(f"File content: {content.decode('utf-8')}")
+        # content = await file_manager.load_file(file_id)
+        # print(f"File content: {content.decode('utf-8')}")
 
         # 列出文件
         files = file_manager.list_files()
         print(f"Files: {files}")
 
 
+async def quick_test():
+    """快速测试 MinIO 服务"""
+    print("🧪 快速测试 MinIO 服务...")
+
+    # MinIO 配置
+    config = S3StorageConfig(
+        storage_type=StorageType.S3,
+        bucket_name="quicktest",
+        endpoint_url="http://localhost:9000",
+        access_key_id="admin",
+        secret_access_key="minioadmin123",
+        prefix="test"
+    )
+
+    storage = StorageFactory.create_storage(config)
+
+    try:
+        async with ImprovedFileManager(storage) as fm:
+            print("✅ 连接成功")
+
+            # 上传测试文件
+            file_id = await fm.save_file(
+                b"Hello MinIO from Python!",
+                "hello.txt",
+                "test"
+            )
+            print(f"✅ 文件上传成功: {file_id}")
+
+            # 下载测试文件
+            metadata, content = await fm.load_file(file_id)
+            print(f"✅ 文件下载成功: {content.decode()}")
+
+            # 删除测试文件
+            # await fm.delete_file(file_id)
+            # print("✅ 文件删除成功")
+
+            print("🎉 MinIO 服务工作正常！")
+
+    except Exception as e:
+        print(f"❌ 测试失败: {e}")
+        print("\n请检查:")
+        print("1. MinIO 服务是否启动: podman ps")
+        print("2. 端口是否正确: http://localhost:9000")
+        print("3. 凭据是否正确: minioadmin/minioadmin123")
+
 if __name__ == "__main__":
     # 运行示例
-    asyncio.run(example_usage())
+    # asyncio.run(example_usage())
+    asyncio.run(quick_test())

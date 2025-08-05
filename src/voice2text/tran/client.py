@@ -1,0 +1,579 @@
+import asyncio
+from pathlib import Path
+from typing import Optional, Dict, List
+from datetime import datetime
+import aiofiles
+# ============================================================================
+# SDK客户端实现
+# ============================================================================
+
+import httpx
+
+from voice2text.tran.schema.dto import ApiResponse, ServiceStatus, FileUploadResult, ResponseCode, TranscribeRequest, \
+    TaskInfo, VoiceprintRegisterRequest, SpeakerStatistics, TranscribeResult, VoicePrintInfo
+
+
+class VoiceSDKClient:
+    """Voice2Text SDK 客户端"""
+
+    def __init__(self, base_url: str, api_key: Optional[str] = None, timeout: float = 300.0):
+        self.base_url = base_url.rstrip('/')
+        self.api_key = api_key
+        self.timeout = timeout
+
+        # 设置请求头
+        headers = {'Content-Type': 'application/json'}
+        if api_key:
+            headers['Authorization'] = f'Bearer {api_key}'
+
+        self.client = httpx.AsyncClient(
+            base_url=self.base_url,
+            headers=headers,
+            timeout=timeout
+        )
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.client.aclose()
+
+    async def _make_request(self, method: str, endpoint: str, **kwargs) -> ApiResponse:
+        """发送HTTP请求并返回标准响应"""
+        try:
+            response = await self.client.request(method, endpoint, **kwargs)
+            response_data = response.json()
+
+            # 转换为标准ApiResponse
+            return ApiResponse(
+                success=response_data.get('success', False),
+                code=response_data.get('code', response.status_code),
+                message=response_data.get('message', ''),
+                data=response_data.get('data'),
+                errors=response_data.get('errors'),
+                request_id=response_data.get('request_id'),
+                timestamp=datetime.fromisoformat(response_data.get('timestamp', datetime.now().isoformat()))
+            )
+
+        except httpx.RequestError as e:
+            return ApiResponse.error_response(f"请求失败: {str(e)}")
+        except Exception as e:
+            return ApiResponse.error_response(f"未知错误: {str(e)}")
+
+    async def health_check(self) -> ApiResponse[ServiceStatus]:
+        """健康检查"""
+        return await self._make_request('GET', '/health')
+
+    async def upload_audio_file(self, file_path: str, category: str = "transcribe") -> ApiResponse[FileUploadResult]:
+        """
+        上传音频文件
+
+        Args:
+            file_path: 本地文件路径
+            category: 文件分类，'transcribe' 或 'voiceprint'
+        """
+        try:
+            path = Path(file_path)
+            if not path.exists():
+                return ApiResponse.error_response("文件不存在", code=ResponseCode.NOT_FOUND.value)
+
+            async with aiofiles.open(file_path, 'rb') as f:
+                file_content = await f.read()
+                files = {'file': (path.name, file_content)}
+
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{self.base_url}/api/v1/audio/upload",
+                        files=files,
+                        params={'category': category},
+                        headers={'Authorization': f'Bearer {self.api_key}'} if self.api_key else {},
+                        timeout=self.timeout
+                    )
+
+            response_data = response.json()
+            return ApiResponse(
+                success=response_data.get("success", False),
+                code=response_data.get("code", response.status_code),
+                message=response_data.get("message", ""),
+                data=response_data.get("data"),
+                errors=response_data.get("errors"),
+            )
+        except Exception as e:
+            return ApiResponse.error_response(f"上传文件失败: {str(e)}")
+
+    async def submit_transcribe_and_get_result(
+            self,
+            file_id: str,
+            wait_for_completion: bool = True,
+            delete_after_processing: bool = True,
+            poll_interval: float = 1.0,
+            timeout: float = 300.0,
+            **transcribe_kwargs
+    ) -> ApiResponse[Dict]:
+        """
+        提交转写任务并获取结果
+
+        Args:
+            file_id: 已上传文件的ID
+            wait_for_completion: 是否等待任务完成
+            delete_after_processing: 处理后是否删除文件
+            poll_interval: 轮询间隔(秒)
+            timeout: 等待超时时间(秒)
+            **transcribe_kwargs: 其他转写参数(threshold, auto_register_unknown等)
+
+        Returns:
+            如果wait_for_completion=True，返回转写结果
+            如果wait_for_completion=False，返回任务信息
+        """
+        try:
+            # 1. 提交转写任务
+            transcribe_task = await self.transcribe_audio(
+                file_id,
+                delete_after_processing=delete_after_processing,
+                **transcribe_kwargs
+            )
+            if not transcribe_task.success:
+                return transcribe_task
+
+            task_id = transcribe_task.data['task_id']
+
+            # 2. 如果不等待完成，直接返回任务信息
+            if not wait_for_completion:
+                return ApiResponse.success_response(
+                    {
+                        "task_id": task_id,
+                        "file_id": file_id,
+                        "task_info": transcribe_task.data,
+                        "message": "转写任务已提交，使用task_id查询进度"
+                    },
+                    "转写任务已提交"
+                )
+
+            # 3. 等待任务完成并获取结果
+            result = await self.wait_for_task_completion(task_id, poll_interval, timeout)
+
+            if result.success:
+                return ApiResponse.success_response(
+                    {
+                        "task_id": task_id,
+                        "file_id": file_id,
+                        "transcript": result.data['transcript'],
+                        "audio_duration": result.data['audio_duration'],
+                        "auto_registered_speakers": result.data['auto_registered_speakers'],
+                        "voiceprint_audio_samples": result.data['voiceprint_audio_samples'],
+                        "output_file": result.data.get('output_file')
+                    },
+                    "转写完成"
+                )
+            else:
+                return result
+
+        except Exception as e:
+            return ApiResponse.error_response(f"转写任务处理失败: {str(e)}")
+
+    async def transcribe_file_direct(
+            self,
+            file_path: str,
+            wait_for_completion: bool = True,
+            delete_after_processing: bool = True,
+            poll_interval: float = 1.0,
+            timeout: float = 300.0,
+            **transcribe_kwargs
+    ) -> ApiResponse[Dict]:
+        """
+        直接转写文件：上传 -> 转写 -> 获取结果 一键完成
+
+        Args:
+            file_path: 本地音频文件路径
+            wait_for_completion: 是否等待任务完成
+            delete_after_processing: 处理后是否删除文件
+            poll_interval: 轮询间隔(秒)
+            timeout: 等待超时时间(秒)
+            **transcribe_kwargs: 其他转写参数(threshold, auto_register_unknown等)
+
+        Returns:
+            如果wait_for_completion=True，返回转写结果
+            如果wait_for_completion=False，返回任务信息
+        """
+        try:
+            # 1. 上传文件
+            upload_result = await self.upload_audio_file(file_path, category="transcribe")
+            if not upload_result.success:
+                return upload_result
+
+            file_id = upload_result.data['file_id']
+
+            try:
+                # 2. 使用新函数提交转写任务并获取结果
+                result = await self.submit_transcribe_and_get_result(
+                    file_id=file_id,
+                    wait_for_completion=wait_for_completion,
+                    delete_after_processing=delete_after_processing,
+                    poll_interval=poll_interval,
+                    timeout=timeout,
+                    **transcribe_kwargs
+                )
+
+                # 如果任务失败且不会自动删除文件，手动清理
+                if not result.success and not delete_after_processing:
+                    try:
+                        await self.delete_file(file_id)
+                    except:
+                        pass
+
+                return result
+
+            except Exception as e:
+                # 出错时清理上传的文件
+                try:
+                    await self.delete_file(file_id)
+                except:
+                    pass
+                return ApiResponse.error_response(f"转写过程中出错: {str(e)}")
+
+        except Exception as e:
+            return ApiResponse.error_response(f"转写文件失败: {str(e)}")
+    async def register_voiceprint_direct(
+            self,
+            person_name: str,
+            file_path: str,
+    ) -> ApiResponse[Dict]:
+        """
+        直接注册声纹：上传 -> 注册 一键完成
+
+        Args:
+            person_name: 人员姓名
+            file_path: 本地音频文件路径
+            delete_after_processing: 处理后是否删除文件
+
+        Returns:
+            声纹注册结果
+        """
+        try:
+            # 1. 上传文件
+            upload_result = await self.upload_audio_file(file_path, category="voiceprint")
+            if not upload_result.success:
+                return upload_result
+
+            file_id = upload_result.data['file_id']
+
+            try:
+                # 2. 注册声纹
+                register_result = await self.register_voiceprint(
+                    person_name,
+                    file_id
+                )
+
+                if register_result.success:
+                    return ApiResponse.success_response(
+                        {
+                            "speaker_id": register_result.data['speaker_id'],
+                            "person_name": register_result.data['person_name'],
+                            "file_id": file_id,
+                            "original_filename": Path(file_path).name
+                        },
+                        "声纹注册成功"
+                    )
+                else:
+                    # 注册失败，清理上传的文件
+                    await self.delete_file(file_id)
+                    return register_result
+
+            except Exception as e:
+                # 出错时清理上传的文件
+                try:
+                    await self.delete_file(file_id)
+                except:
+                    pass
+                return ApiResponse.error_response(f"声纹注册过程中出错: {str(e)}")
+
+        except Exception as e:
+            return ApiResponse.error_response(f"声纹注册失败: {str(e)}")
+
+    async def delete_speaker_audio_sample(self, speaker_id: str, file_id: str) -> ApiResponse[Dict]:
+        """
+        删除特定说话人的音频样本
+
+        Args:
+            speaker_id: 说话人ID
+            file_id: 音频文件ID
+        """
+        return await self._make_request('DELETE', f'/api/v1/speakers/{speaker_id}/samples/{file_id}')
+
+    async def transcribe_audio(self, audio_file_id: str, delete_after_processing: bool = True, **kwargs) -> ApiResponse[
+        TaskInfo]:
+        """
+        提交音频转写任务
+
+        Args:
+            audio_file_id: 上传文件返回的file_id
+            delete_after_processing: 处理后是否删除文件
+            **kwargs: 其他转写参数
+        """
+        request_data = TranscribeRequest(
+            audio_file_id=audio_file_id,
+            delete_after_processing=delete_after_processing,
+            **kwargs
+        ).__dict__
+        return await self._make_request('POST', '/api/v1/audio/transcribe', json=request_data)
+
+    async def register_voiceprint(self, person_name: str, audio_file_id: str) -> \
+    ApiResponse[Dict]:
+        """
+        注册声纹
+
+        Args:
+            person_name: 人员姓名
+            audio_file_id: 上传文件返回的file_id
+            delete_after_processing: 处理后是否删除文件
+        """
+        request_data = VoiceprintRegisterRequest(
+            person_name=person_name,
+            audio_file_id=audio_file_id
+        ).__dict__
+        return await self._make_request('POST', '/api/v1/voiceprints/register', json=request_data)
+
+    async def get_task_status(self, task_id: str) -> ApiResponse[TaskInfo]:
+        """获取任务状态"""
+        return await self._make_request('GET', f'/api/v1/tasks/{task_id}')
+
+    async def get_task_result(self, task_id: str) -> ApiResponse[TranscribeResult]:
+        """获取任务结果"""
+        return await self._make_request('GET', f'/api/v1/tasks/{task_id}/result')
+
+    async def list_voiceprints(self, include_unnamed: bool = True) -> ApiResponse[List[VoicePrintInfo]]:
+        """获取声纹列表"""
+        params = {'include_unnamed': include_unnamed}
+        return await self._make_request('GET', '/api/v1/voiceprints/list', params=params)
+
+
+    async def rename_speaker(self, speaker_id: str, new_name: str) -> ApiResponse[Dict]:
+        """重命名说话人"""
+        params = {'new_name': new_name}
+        return await self._make_request('PUT', f'/api/v1/speakers/{speaker_id}/rename', params=params)
+
+    async def delete_speaker(self, speaker_id: str) -> ApiResponse[Dict]:
+        """删除说话人"""
+        return await self._make_request('DELETE', f'/api/v1/speakers/{speaker_id}')
+
+    async def get_statistics(self) -> ApiResponse[SpeakerStatistics]:
+        """获取统计信息"""
+        return await self._make_request('GET', '/api/v1/statistics')
+
+    async def list_files(self, category: Optional[str] = None) -> ApiResponse[List[Dict]]:
+        """列出文件"""
+        params = {'category': category} if category else {}
+        return await self._make_request('GET', '/api/v1/files/list', params=params)
+
+    async def download_file(self, file_id: str, save_path: str) -> ApiResponse[Dict]:
+        """
+        下载文件
+
+        Args:
+            file_id: 文件ID
+            save_path: 保存路径
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/files/{file_id}/download",
+                    headers={'Authorization': f'Bearer {self.api_key}'} if self.api_key else {},
+                    timeout=self.timeout
+                )
+
+                if response.status_code == 200:
+                    async with aiofiles.open(save_path, 'wb') as f:
+                        async for chunk in response.aiter_bytes():
+                            await f.write(chunk)
+
+                    return ApiResponse.success_response(
+                        {"saved_path": save_path, "size": len(response.content)},
+                        "文件下载成功"
+                    )
+                else:
+                    error_data = response.json()
+                    return ApiResponse.error_response(
+                        error_data.get('message', '下载失败'),
+                        code=response.status_code
+                    )
+
+        except Exception as e:
+            return ApiResponse.error_response(f"下载文件失败: {str(e)}")
+
+    async def delete_file(self, file_id: str) -> ApiResponse[Dict]:
+        """删除文件"""
+        return await self._make_request('DELETE', f'/api/v1/files/{file_id}')
+
+    async def get_file_info(self, file_id: str) -> ApiResponse[Dict]:
+        """获取文件信息"""
+        return await self._make_request('GET', f'/api/v1/files/{file_id}/info')
+
+    async def wait_for_task_completion(self, task_id: str, poll_interval: float = 1.0, timeout: float = 300000000.0) -> \
+    ApiResponse[TranscribeResult]:
+        """等待任务完成并返回结果"""
+        import time
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            status_response = await self.get_task_status(task_id)
+
+            if not status_response.success:
+                return status_response
+
+            task_status = status_response.data.get('status')
+
+            if task_status == 'completed':
+                return await self.get_task_result(task_id)
+            elif task_status == 'failed':
+                return ApiResponse.error_response("任务执行失败")
+            elif task_status == 'cancelled':
+                return ApiResponse.error_response("任务已取消")
+
+            await asyncio.sleep(poll_interval)
+
+        return ApiResponse.error_response("等待任务完成超时")
+
+
+# ============================================================================
+# 使用示例
+# ============================================================================
+
+async def example_usage():
+    """SDK使用示例"""
+
+    # 客户端使用示例
+    async with VoiceSDKClient("http://localhost:8765") as client:
+        # 1. 健康检查
+        health = await client.health_check()
+        print(f"服务状态: {health.message}")
+
+        # 2. 上传音频文件用于转写
+        upload_result = await client.upload_audio_file(
+            "../../data/刘星家_20231212_122300_家有儿女吃饭.mp3",
+            category="transcribe"
+        )
+        if upload_result.success:
+            file_id = upload_result.data['file_id']
+            print(f"转写文件上传成功，文件ID: {file_id}")
+
+            # 3. 提交转写任务（处理后保留文件）
+            transcribe_task = await client.transcribe_audio(
+                file_id,
+                delete_after_processing=False
+            )
+            if transcribe_task.success:
+                task_id = transcribe_task.data['task_id']
+                print(f"转写任务已提交: {task_id}")
+
+                # 4. 等待任务完成
+                result = await client.wait_for_task_completion(task_id)
+                if result.success:
+                    print(f"转写结果: {result.data['transcript']}")
+                else:
+                    print(f"转写失败: {result.message}")
+
+        # 5. 上传音频文件用于声纹注册
+        voiceprint_upload = await client.upload_audio_file(
+            "../../data/sample_voice.wav",
+            category="voiceprint"
+        )
+        if voiceprint_upload.success:
+            voiceprint_file_id = voiceprint_upload.data['file_id']
+            print(f"声纹文件上传成功，文件ID: {voiceprint_file_id}")
+
+            # 6. 注册声纹
+            register_result = await client.register_voiceprint(
+                "张三",
+                voiceprint_file_id,
+                delete_after_processing=True
+            )
+            if register_result.success:
+                print(f"声纹注册任务已提交: {register_result.data['task_id']}")
+
+        # 7. 获取文件列表
+        files = await client.list_files()
+        if files.success:
+            print(f"文件列表: {len(files.data)} 个文件")
+            for file_info in files.data:
+                print(f"  - {file_info['filename']} ({file_info['category']})")
+
+        # 8. 获取声纹列表
+        voiceprints = await client.list_voiceprints()
+        if voiceprints.success:
+            print(f"已注册声纹数量: {len(voiceprints.data)}")
+
+        # 9. 下载文件示例
+        if upload_result.success:
+            download_result = await client.download_file(
+                file_id,
+                "./downloaded_file.mp3"
+            )
+            if download_result.success:
+                print(f"文件下载成功: {download_result.data['saved_path']}")
+
+
+
+# ============================================================================
+# 使用示例
+# ============================================================================
+
+async def example_usage():
+    """SDK使用示例"""
+
+    # 客户端使用示例
+    async with VoiceSDKClient(base_url="http://localhost:8765", timeout=600) as client:
+        # 1. 健康检查
+        # health = await client.health_check()
+        # print(f"服务状态: {health.message}")
+        # await client.rename_speaker("Speaker_68dc353b", "夏东海2")
+        # 注册声纹
+        #
+        # upload_voice = await client.upload_audio_file("../../data/sample/刘星.mp3", category="voiceprint")
+        # if upload_voice.success:
+        #     register_result = await client.register_voiceprint("刘星", upload_voice.data['file_id'])
+        #
+        #
+        # # 2. 上传音频文件
+        # upload_result = await client.upload_audio_file("../../data/刘星家_20231212_122300_家有儿女吃饭.mp3")
+        # if upload_result.success:
+        #     file_id = upload_result.data['file_id']
+        #     print(f"文件上传成功，文件ID: {file_id}")
+        #
+        #     # 3. 提交转写任务
+        #     transcribe_task = await client.transcribe_audio(file_id)
+        #     if transcribe_task.success:
+        #         task_id = transcribe_task.data['task_id']
+        #         print(f"转写任务已提交: {task_id}")
+        #
+        #         # 4. 等待任务完成
+        #         result = await client.wait_for_task_completion(task_id)
+        #         if result.success:
+        #             print(f"转写结果: {result.data['transcript']}")
+        #         else:
+        #             print(f"转写失败: {result.message}")
+
+        # r1 = await client.register_voiceprint_direct("刘星", "../../data/sample/刘星.mp3")
+        # print(f"声纹注册结果: {r1.message}, 数据: {r1.data}")
+        # r2 = await client.transcribe_file_direct("../../data/刘星家_20231212_122300_家有儿女吃饭.mp3")
+        # print(f"转写结果: {r2.message}, 数据: {r2.data}")
+        # 5. 获取声纹列表
+        # voiceprints = await client.list_voiceprints()
+        # if voiceprints.success:
+        #     print(f"已注册声纹: {voiceprints.data}")
+
+        # await client.delete_speaker("刘星")
+        #
+        # await client.delete_speaker_audio_sample("夏东海2", "d178f549-d74e-4437-9538-d5b0e1f53853")
+        #
+        voiceprints = await client.list_voiceprints()
+        if voiceprints.success:
+            print(f"已注册声纹: {voiceprints.data}")
+
+        # await client.delete_speaker()
+        # await client.download_file("160a3e39-107e-4727-a371-eeff3b095eaf", "./刘星_sample5.")
+
+
+if __name__ == "__main__":
+
+
+    # 运行示例
+    asyncio.run(example_usage())
