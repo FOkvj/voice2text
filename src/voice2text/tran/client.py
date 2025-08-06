@@ -356,9 +356,13 @@ class VoiceSDKClient:
         params = {'new_name': new_name}
         return await self._make_request('PUT', f'/api/v1/speakers/{speaker_id}/rename', Dict, params=params)
 
-    async def delete_speaker(self, speaker_id: str) -> ApiResponse[Dict]:
+    async def delete_speaker(self, speaker_id: str) -> bool:
         """删除说话人"""
-        return await self._make_request('DELETE', f'/api/v1/speakers/{speaker_id}')
+        response = await self._make_request('DELETE', f'/api/v1/speakers/{speaker_id}')
+        if response.success:
+            return True
+        else:
+            return False
 
     async def get_statistics(self) -> ApiResponse[SpeakerStatistics]:
         """获取统计信息"""
