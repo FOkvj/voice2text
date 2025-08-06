@@ -353,7 +353,7 @@ class VoiceSDKServer:
             """获取声纹列表"""
             try:
                 voice_prints = await self.voice_service.list_registered_voices_async(include_unnamed)
-                return ApiResponse[List[VoicePrintInfo]].success_response(voice_prints)
+                return ApiResponse.success_response(voice_prints)
 
             except Exception as e:
                 return ApiResponse.error_response(

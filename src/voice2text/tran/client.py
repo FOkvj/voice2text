@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 from datetime import datetime
 import aiofiles
+from pydantic import TypeAdapter
 # ============================================================================
 # SDK客户端实现
 # ============================================================================
@@ -39,18 +40,22 @@ class VoiceSDKClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.client.aclose()
 
-    async def _make_request(self, method: str, endpoint: str, **kwargs) -> ApiResponse:
+    async def _make_request(self, method: str, endpoint: str, response_model=Dict, **kwargs) -> ApiResponse:
         """发送HTTP请求并返回标准响应"""
         try:
             response = await self.client.request(method, endpoint, **kwargs)
+            response.raise_for_status()
+
             response_data = response.json()
+
+            adapter = TypeAdapter(response_model)
 
             # 转换为标准ApiResponse
             return ApiResponse(
                 success=response_data.get('success', False),
                 code=response_data.get('code', response.status_code),
                 message=response_data.get('message', ''),
-                data=response_data.get('data'),
+                data=adapter.validate_python(response_data.get('data', {})),
                 errors=response_data.get('errors'),
                 request_id=response_data.get('request_id'),
                 timestamp=datetime.fromisoformat(response_data.get('timestamp', datetime.now().isoformat()))
@@ -63,7 +68,7 @@ class VoiceSDKClient:
 
     async def health_check(self) -> ApiResponse[ServiceStatus]:
         """健康检查"""
-        return await self._make_request('GET', '/health')
+        return await self._make_request('GET', '/health', ServiceStatus)
 
     async def upload_audio_file(self, file_path: str, category: str = "transcribe") -> ApiResponse[FileUploadResult]:
         """
@@ -308,7 +313,7 @@ class VoiceSDKClient:
             delete_after_processing=delete_after_processing,
             **kwargs
         ).__dict__
-        return await self._make_request('POST', '/api/v1/audio/transcribe', json=request_data)
+        return await self._make_request('POST', '/api/v1/audio/transcribe', TaskInfo, json=request_data)
 
     async def register_voiceprint(self, person_name: str, audio_file_id: str) -> \
     ApiResponse[SampleInfo]:
@@ -324,26 +329,26 @@ class VoiceSDKClient:
             person_name=person_name,
             audio_file_id=audio_file_id
         ).__dict__
-        return await self._make_request('POST', '/api/v1/voiceprints/register', json=request_data)
+        return await self._make_request('POST', '/api/v1/voiceprints/register', SampleInfo, json=request_data)
 
     async def get_task_status(self, task_id: str) -> ApiResponse[TaskInfo]:
         """获取任务状态"""
-        return await self._make_request('GET', f'/api/v1/tasks/{task_id}')
+        return await self._make_request('GET', f'/api/v1/tasks/{task_id}', TaskInfo)
 
     async def get_task_result(self, task_id: str) -> ApiResponse[TranscribeResult]:
         """获取任务结果"""
-        return await self._make_request('GET', f'/api/v1/tasks/{task_id}/result')
+        return await self._make_request('GET', f'/api/v1/tasks/{task_id}/result', TranscribeResult)
 
     async def list_voiceprints(self, include_unnamed: bool = True) -> ApiResponse[List[VoicePrintInfo]]:
         """获取声纹列表"""
         params = {'include_unnamed': include_unnamed}
-        return await self._make_request('GET', '/api/v1/voiceprints/list', params=params)
+        return await self._make_request('GET', '/api/v1/voiceprints/list', List[VoicePrintInfo], params=params)
 
 
     async def rename_speaker(self, speaker_id: str, new_name: str) -> ApiResponse[Dict]:
         """重命名说话人"""
         params = {'new_name': new_name}
-        return await self._make_request('PUT', f'/api/v1/speakers/{speaker_id}/rename', params=params)
+        return await self._make_request('PUT', f'/api/v1/speakers/{speaker_id}/rename', Dict, params=params)
 
     async def delete_speaker(self, speaker_id: str) -> ApiResponse[Dict]:
         """删除说话人"""
@@ -351,12 +356,12 @@ class VoiceSDKClient:
 
     async def get_statistics(self) -> ApiResponse[SpeakerStatistics]:
         """获取统计信息"""
-        return await self._make_request('GET', '/api/v1/statistics')
+        return await self._make_request('GET', '/api/v1/statistics', SpeakerStatistics)
 
     async def list_files(self, category: Optional[str] = None) -> ApiResponse[List[Dict]]:
         """列出文件"""
         params = {'category': category} if category else {}
-        return await self._make_request('GET', '/api/v1/files/list', params=params)
+        return await self._make_request('GET', '/api/v1/files/list', List[Dict], params=params)
 
     async def download_file(self, file_id: str, save_path: str) -> ApiResponse[Dict]:
         """

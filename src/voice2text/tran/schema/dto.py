@@ -3,9 +3,10 @@
 # ============================================================================
 
 from typing import Generic, TypeVar, Optional, Any, Dict, List, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from enum import Enum
 from datetime import datetime
+from pydantic import BaseModel
 import json
 
 from voice2text.tran.schema.prints import SampleInfo
@@ -34,8 +35,8 @@ class ResponseCode(Enum):
     SERVICE_UNAVAILABLE = 503
 
 
-@dataclass
-class ApiResponse(Generic[T]):
+
+class ApiResponse(Generic[T], BaseModel):
     """标准API响应格式"""
     success: bool
     code: int
@@ -137,13 +138,14 @@ class TranscribeResult:
 
 
 
-@dataclass
-class VoicePrintInfo:
+class VoicePrintInfo(BaseModel):
     """声纹信息DTO"""
     speaker_id: str
     sample_list: List[SampleInfo]
     named: bool = False
-
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典"""
+        return asdict(self)
 
 
 
