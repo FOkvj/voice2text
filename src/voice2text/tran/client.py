@@ -294,7 +294,7 @@ class VoiceSDKClient:
         except Exception as e:
             return ApiResponse.error_response(f"声纹注册失败: {str(e)}")
 
-    async def delete_speaker_audio_sample(self, speaker_id: str, file_id: str) -> ApiResponse[Dict]:
+    async def delete_speaker_audio_sample(self, speaker_id: str, file_id: str) -> bool:
         """
         删除特定说话人的音频样本
 
@@ -302,7 +302,11 @@ class VoiceSDKClient:
             speaker_id: 说话人ID
             file_id: 音频文件ID
         """
-        return await self._make_request('DELETE', f'/api/v1/speakers/{speaker_id}/samples/{file_id}')
+        response = await self._make_request('DELETE', f'/api/v1/speakers/{speaker_id}/samples/{file_id}')
+        if response.success:
+            return True
+        else:
+            return False
 
     async def transcribe_audio(self, audio_file_id: str, delete_after_processing: bool = True, **kwargs) -> ApiResponse[
         TaskInfo]:

@@ -36,7 +36,7 @@ class ResponseCode(Enum):
 
 
 
-class ApiResponse(Generic[T], BaseModel):
+class ApiResponse(BaseModel, Generic[T]):
     """标准API响应格式"""
     success: bool
     code: int
