@@ -1,4 +1,5 @@
 import asyncio
+import io
 from pathlib import Path
 from typing import Optional, Dict, List
 from datetime import datetime
@@ -363,15 +364,19 @@ class VoiceSDKClient:
         params = {'category': category} if category else {}
         return await self._make_request('GET', '/api/v1/files/list', List[Dict], params=params)
 
-    async def get_file_stream(self, file_id: str) -> ApiResponse[httpx.Response]:
+    import io
+    import json
+    from typing import Dict, Optional
+
+    async def get_file_stream(self, file_id: str) -> ApiResponse[io.BytesIO]:
         """
-        下载文件流（不保存到本地）
+        下载文件流（返回BytesIO对象）
 
         Args:
             file_id: 文件ID
 
         Returns:
-            ApiResponse containing httpx.Response for streaming
+            ApiResponse containing BytesIO object with file content
         """
         try:
             async with httpx.AsyncClient() as client:
@@ -382,19 +387,70 @@ class VoiceSDKClient:
                 )
 
                 if response.status_code == 200:
+                    # 创建 BytesIO 对象并写入内容
+                    file_stream = io.BytesIO()
+
+                    # 处理流式响应
+                    async for chunk in response.aiter_bytes():
+                        file_stream.write(chunk)
+
+                    # 重置指针到开头
+                    file_stream.seek(0)
+
+                    # 从响应头获取文件信息并添加为属性
+                    content_disposition = response.headers.get("content-disposition", "")
+                    filename = self._extract_filename_from_disposition(content_disposition)
+
+                    file_stream.filename = filename
+                    file_stream.content_type = response.headers.get("content-type", "application/octet-stream")
+                    file_stream.size = int(response.headers.get("content-length", 0))
+
                     return ApiResponse.success_response(
-                        response,
+                        file_stream,
                         "文件流获取成功"
                     )
                 else:
-                    error_data = response.json()
-                    return ApiResponse.error_response(
-                        error_data.get('message', '下载失败'),
-                        code=response.status_code
-                    )
+                    # 处理错误响应（可能是JSON格式的ApiResponse）
+                    try:
+                        error_data = response.json()
+                        if isinstance(error_data, dict) and 'message' in error_data:
+                            # 这是 ApiResponse 格式的错误
+                            return ApiResponse.error_response(
+                                error_data.get('message', '下载失败'),
+                                code=error_data.get('code', response.status_code)
+                            )
+                        else:
+                            return ApiResponse.error_response(
+                                f'下载失败: HTTP {response.status_code}',
+                                code=response.status_code
+                            )
+                    except (json.JSONDecodeError, ValueError):
+                        # 响应不是JSON格式
+                        return ApiResponse.error_response(
+                            f'下载失败: HTTP {response.status_code}',
+                            code=response.status_code
+                        )
 
+        except httpx.TimeoutException:
+            return ApiResponse.error_response("下载文件超时")
+        except httpx.NetworkError as e:
+            return ApiResponse.error_response(f"网络错误: {str(e)}")
         except Exception as e:
-            return ApiResponse.error_response(f"获取文件流失败: {str(e)}")
+            return ApiResponse.error_response(f"下载文件失败: {str(e)}")
+
+    def _extract_filename_from_disposition(self, content_disposition: str) -> str:
+        """从Content-Disposition头中提取文件名"""
+        if not content_disposition:
+            return "unknown_file"
+
+        # 处理 "attachment; filename=example.txt" 格式
+        if "filename=" in content_disposition:
+            filename_part = content_disposition.split("filename=")[1]
+            # 移除可能的引号和分号后的内容
+            filename = filename_part.split(';')[0].strip().strip('"\'')
+            return filename if filename else "unknown_file"
+
+        return "unknown_file"
 
     async def download_file(self, file_id: str, save_path: str) -> ApiResponse[Dict]:
         """
