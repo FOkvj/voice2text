@@ -406,7 +406,7 @@ class ChromaDBImplementation(VectorDatabaseInterface):
                     embedding=embedding,
                     sample_number=metadata['sample_number'],
                     audio_duration=metadata['audio_duration'],
-                    created_at=datetime.fromisoformat(metadata['created_at']),
+                    created_at=metadata['created_at'],
                     metadata={k: v for k, v in metadata.items()
                               if k not in ['speaker_id', 'sample_number', 'audio_duration', 'created_at']}
                 )
@@ -468,8 +468,10 @@ class ChromaDBImplementation(VectorDatabaseInterface):
                 existing_record.metadata.update(updates['metadata'])
 
             # 删除旧记录并插入新记录
+            result = await self.insert_vector(existing_record)
             self.collection.delete(ids=[vector_id])
-            return await self.insert_vector(existing_record)
+            return result
+
 
         except Exception as e:
             self.logger.error(f"Failed to update vector {vector_id}: {e}")
