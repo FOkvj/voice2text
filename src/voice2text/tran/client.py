@@ -363,6 +363,39 @@ class VoiceSDKClient:
         params = {'category': category} if category else {}
         return await self._make_request('GET', '/api/v1/files/list', List[Dict], params=params)
 
+    async def get_file_stream(self, file_id: str) -> ApiResponse[httpx.Response]:
+        """
+        下载文件流（不保存到本地）
+
+        Args:
+            file_id: 文件ID
+
+        Returns:
+            ApiResponse containing httpx.Response for streaming
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.base_url}/api/v1/files/{file_id}/download",
+                    headers={'Authorization': f'Bearer {self.api_key}'} if self.api_key else {},
+                    timeout=self.timeout
+                )
+
+                if response.status_code == 200:
+                    return ApiResponse.success_response(
+                        response,
+                        "文件流获取成功"
+                    )
+                else:
+                    error_data = response.json()
+                    return ApiResponse.error_response(
+                        error_data.get('message', '下载失败'),
+                        code=response.status_code
+                    )
+
+        except Exception as e:
+            return ApiResponse.error_response(f"获取文件流失败: {str(e)}")
+
     async def download_file(self, file_id: str, save_path: str) -> ApiResponse[Dict]:
         """
         下载文件
