@@ -112,7 +112,7 @@ class VoiceSDKServer:
                 current_load=stats.get('current_load', 0)
             )
 
-            return ApiResponse.success_response(status.__dict__).to_dict()
+            return ApiResponse.success_response(status.__dict__)
 
         @self.app.post("/api/v1/audio/upload")
         async def upload_audio_file(
@@ -132,14 +132,14 @@ class VoiceSDKServer:
                     return ApiResponse.error_response(
                         "不支持的音频格式",
                         code=ResponseCode.UNPROCESSABLE_ENTITY.value
-                    ).to_dict()
+                    )
 
                 # 验证分类
                 if category not in ["transcribe", "voiceprint"]:
                     return ApiResponse.error_response(
                         "分类必须是 'transcribe' 或 'voiceprint'",
                         code=ResponseCode.BAD_REQUEST.value
-                    ).to_dict()
+                    )
 
                 # 读取文件内容
                 content = await file.read()
@@ -170,13 +170,13 @@ class VoiceSDKServer:
                     result.__dict__,
                     "文件上传成功",
                     code=ResponseCode.CREATED.value
-                ).to_dict()
+                )
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"文件上传失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.post("/api/v1/audio/transcribe")
         async def transcribe_audio(request: TranscribeRequest):
@@ -188,21 +188,21 @@ class VoiceSDKServer:
                     return ApiResponse.error_response(
                         "文件不存在",
                         code=ResponseCode.NOT_FOUND.value
-                    ).to_dict()
+                    )
 
                 # 验证文件分类
                 if meta.category != "transcribe":
                     return ApiResponse.error_response(
                         "文件分类错误，该文件不是用于转写的音频文件",
                         code=ResponseCode.BAD_REQUEST.value
-                    ).to_dict()
+                    )
 
                 # 加载文件数据
                 if not input_data:
                     return ApiResponse.error_response(
                         "无法读取文件数据",
                         code=ResponseCode.INTERNAL_ERROR.value
-                    ).to_dict()
+                    )
 
                 # 解析文件名信息
                 file_location, file_date, file_time = parse_filename(meta.filename)
@@ -238,13 +238,13 @@ class VoiceSDKServer:
                     task_dto.__dict__,
                     "转写任务已提交",
                     code=ResponseCode.ACCEPTED.value
-                ).to_dict()
+                )
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"提交转写任务失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.get("/api/v1/tasks/{task_id}")
         async def get_task_status(task_id: str):
@@ -256,7 +256,7 @@ class VoiceSDKServer:
                     return ApiResponse.error_response(
                         progress["error"],
                         code=ResponseCode.NOT_FOUND.value
-                    ).to_dict()
+                    )
 
                 task_dto = TaskInfo(
                     task_id=progress["task_id"],
@@ -269,13 +269,13 @@ class VoiceSDKServer:
                     metadata=progress.get("metadata", {})
                 )
 
-                return ApiResponse.success_response(task_dto.__dict__).to_dict()
+                return ApiResponse.success_response(task_dto.__dict__)
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"获取任务状态失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.get("/api/v1/tasks/{task_id}/result")
         async def get_task_result(task_id: str):
@@ -303,13 +303,13 @@ class VoiceSDKServer:
                     output_file=result.get("output_file")
                 )
 
-                return ApiResponse.success_response(result_dto.__dict__).to_dict()
+                return ApiResponse.success_response(result_dto.__dict__)
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"获取任务结果失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.post("/api/v1/voiceprints/register")
         async def register_voiceprint(request: VoiceprintRegisterRequest):
@@ -321,14 +321,14 @@ class VoiceSDKServer:
                     return ApiResponse.error_response(
                         "文件不存在",
                         code=ResponseCode.NOT_FOUND.value
-                    ).to_dict()
+                    )
 
                 # 验证文件分类
                 if meta.category != "voiceprint":
                     return ApiResponse.error_response(
                         "文件分类错误，该文件不是用于声纹注册的音频文件",
                         code=ResponseCode.BAD_REQUEST.value
-                    ).to_dict()
+                    )
 
                 # 提交声纹注册任务
                 sample_info: SampleInfo = await self.voice_service.register_voice_async(
@@ -340,26 +340,26 @@ class VoiceSDKServer:
                     sample_info,
                     "声纹注册任务已提交",
                     code=ResponseCode.ACCEPTED.value
-                ).to_dict()
+                )
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"注册声纹失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.get("/api/v1/voiceprints/list")
         async def list_voiceprints(include_unnamed: bool = True):
             """获取声纹列表"""
             try:
                 voice_prints = await self.voice_service.list_registered_voices_async(include_unnamed)
-                return ApiResponse.success_response(voice_prints).to_dict()
+                return ApiResponse.success_response(voice_prints)
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"获取声纹列表失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
 
         @self.app.put("/api/v1/speakers/{speaker_id}/rename")
@@ -373,7 +373,7 @@ class VoiceSDKServer:
                         {"new_name": new_name},
                         f"{speaker_id}已重命名为{new_name}",
                         code=ResponseCode.ACCEPTED.value
-                    ).to_dict()
+                    )
                 return ApiResponse.error_response(
                     "重命名失败",
                 )
@@ -381,7 +381,7 @@ class VoiceSDKServer:
                 return ApiResponse.error_response(
                     f"重命名说话人失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.delete("/api/v1/speakers/{speaker_id}/samples/{file_id}")
         async def delete_speaker_audio_sample(
@@ -399,18 +399,18 @@ class VoiceSDKServer:
                     return ApiResponse.success_response(
                         {"deleted": True},
                         "音频样本删除成功"
-                    ).to_dict()
+                    )
                 else:
                     return ApiResponse.error_response(
                         "音频样本不存在或删除失败",
                         code=ResponseCode.NOT_FOUND.value
-                    ).to_dict()
+                    )
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"删除音频样本失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.delete("/api/v1/speakers/{speaker_id}")
         async def delete_speaker(speaker_id: str):
@@ -422,18 +422,18 @@ class VoiceSDKServer:
                     return ApiResponse.error_response(
                         "说话人不存在或删除失败",
                         code=ResponseCode.NOT_FOUND.value
-                    ).to_dict()
+                    )
                 return ApiResponse.success_response(
                     speaker_id,
                     "删除成功",
                     code=ResponseCode.ACCEPTED.value
-                ).to_dict()
+                )
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"删除说话人失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.get("/api/v1/statistics")
         async def get_statistics():
@@ -450,26 +450,26 @@ class VoiceSDKServer:
                     average_samples_per_speaker=stats.get("average_samples_per_speaker", 0.0)
                 )
 
-                return ApiResponse.success_response(statistics.__dict__).to_dict()
+                return ApiResponse.success_response(statistics.__dict__)
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"获取统计信息失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.get("/api/v1/files/list")
         async def list_files(category: Optional[str] = Query(None, description="文件分类过滤")):
             """列出已上传的文件"""
             try:
                 files = self.file_manager.list_files(category=category)
-                return ApiResponse.success_response(files).to_dict()
+                return ApiResponse.success_response(files)
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"获取文件列表失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.get("/api/v1/files/{file_id}/download")
         async def download_file(file_id: str = FastAPIPath(..., description="文件ID")):
@@ -481,7 +481,7 @@ class VoiceSDKServer:
                     return ApiResponse.error_response(
                         "文件不存在",
                         code=ResponseCode.NOT_FOUND.value
-                    ).to_dict()
+                    )
 
                 # 加载文件内容
                 file_content = await self.file_manager.load_file(file_id)
@@ -489,7 +489,7 @@ class VoiceSDKServer:
                     return ApiResponse.error_response(
                         "无法读取文件内容",
                         code=ResponseCode.INTERNAL_ERROR.value
-                    ).to_dict()
+                    )
 
                 # 创建流式响应
                 def iter_content():
@@ -508,7 +508,7 @@ class VoiceSDKServer:
                 return ApiResponse.error_response(
                     f"下载文件失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.delete("/api/v1/files/{file_id}")
         async def delete_file(file_id: str = FastAPIPath(..., description="文件ID")):
@@ -519,18 +519,18 @@ class VoiceSDKServer:
                     return ApiResponse.success_response(
                         {"deleted": True},
                         "文件删除成功"
-                    ).to_dict()
+                    )
                 else:
                     return ApiResponse.error_response(
                         "文件不存在或删除失败",
                         code=ResponseCode.NOT_FOUND.value
-                    ).to_dict()
+                    )
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"删除文件失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
         @self.app.get("/api/v1/files/{file_id}/info")
         async def get_file_info(file_id: str = FastAPIPath(..., description="文件ID")):
@@ -541,7 +541,7 @@ class VoiceSDKServer:
                     return ApiResponse.error_response(
                         "文件不存在",
                         code=ResponseCode.NOT_FOUND.value
-                    ).to_dict()
+                    )
 
                 file_info = {
                     "file_id": meta.file_id,
@@ -556,13 +556,13 @@ class VoiceSDKServer:
                     "metadata": meta.metadata
                 }
 
-                return ApiResponse.success_response(file_info).to_dict()
+                return ApiResponse.success_response(file_info)
 
             except Exception as e:
                 return ApiResponse.error_response(
                     f"获取文件信息失败: {str(e)}",
                     code=ResponseCode.INTERNAL_ERROR.value
-                ).to_dict()
+                )
 
     def _is_valid_audio_file(self, filename: str) -> bool:
         """验证音频文件格式"""
