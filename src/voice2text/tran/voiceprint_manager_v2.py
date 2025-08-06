@@ -17,9 +17,10 @@ from voice2text.tran.vector_base import (
 class AudioInputHandler:
     """音频输入处理器 - 统一处理文件路径和二进制数据"""
 
-    def __init__(self, temp_dir: Optional[str] = None):
+    def __init__(self, temp_dir: Optional[str] = None, min_duration: float = 0.1):
         self.temp_dir = temp_dir or tempfile.gettempdir()
         self._temp_files = []  # 跟踪临时文件以便清理
+        self.min_duration = min_duration  # 最小音频时长（秒）
 
     def __enter__(self):
         return self
@@ -85,23 +86,104 @@ class AudioInputHandler:
             # 字节数据
             with io.BytesIO(audio_input) as buffer:
                 wav, sr = sf.read(buffer)
+
+                # 验证音频数据有效性
+                if len(wav) == 0:
+                    raise ValueError("Audio data is empty")
+
+                # 检查音频时长是否足够
+                duration = len(wav) / sr
+                if duration < self.min_duration:
+                    raise ValueError(
+                        f"Audio duration ({duration:.3f}s) is too short. Minimum duration: {self.min_duration}s")
+
+                # 安全的重采样
                 if sr != target_sr:
-                    wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+                    wav = self._safe_resample(wav, sr, target_sr)
+
                 return wav, target_sr
 
         elif hasattr(audio_input, 'read'):
             # 文件对象
             audio_input.seek(0)  # 确保从开头读取
             wav, sr = sf.read(audio_input)
+
+            # 验证音频数据有效性
+            if len(wav) == 0:
+                raise ValueError("Audio data is empty")
+
+            # 检查音频时长是否足够
+            duration = len(wav) / sr
+            if duration < self.min_duration:
+                raise ValueError(
+                    f"Audio duration ({duration:.3f}s) is too short. Minimum duration: {self.min_duration}s")
+
+            # 安全的重采样
             if sr != target_sr:
-                wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+                wav = self._safe_resample(wav, sr, target_sr)
+
             return wav, target_sr
 
         else:
             raise ValueError(f"Unsupported audio input type: {type(audio_input)}")
 
+    def _safe_resample(self, wav: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+        """
+        安全的重采样函数，处理短音频和边缘情况
+
+        Args:
+            wav: 音频数据
+            orig_sr: 原始采样率
+            target_sr: 目标采样率
+
+        Returns:
+            重采样后的音频数据
+        """
+        if orig_sr == target_sr:
+            return wav
+
+        # 计算最小所需样本数
+        min_samples = max(1, int(0.01 * orig_sr))  # 至少10ms的音频
+
+        if len(wav) < min_samples:
+            # 对于太短的音频，先填充零值
+            padding_needed = min_samples - len(wav)
+            wav = np.pad(wav, (0, padding_needed), mode='constant', constant_values=0)
+            print(f"Warning: Audio too short, padded with {padding_needed} zero samples")
+
+        try:
+            # 使用librosa进行重采样
+            return librosa.resample(wav, orig_sr=orig_sr, target_sr=target_sr)
+        except Exception as e:
+            print(f"Warning: librosa resampling failed: {e}")
+            # 备用方案：简单的线性插值重采样
+            return self._simple_resample(wav, orig_sr, target_sr)
+
+    def _simple_resample(self, wav: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+        """
+        简单的线性插值重采样（备用方案）
+        """
+        if orig_sr == target_sr:
+            return wav
+
+        # 计算重采样比率
+        ratio = target_sr / orig_sr
+        new_length = int(len(wav) * ratio)
+
+        if new_length == 0:
+            new_length = 1
+
+        # 使用线性插值
+        old_indices = np.arange(len(wav))
+        new_indices = np.linspace(0, len(wav) - 1, new_length)
+
+        return np.interp(new_indices, old_indices, wav)
+
     def _save_bytes_to_temp_file(self, audio_bytes: bytes) -> str:
         """保存字节数据到临时文件"""
+        if len(audio_bytes) == 0:
+            raise ValueError("Audio bytes data is empty")
+
         temp_file = os.path.join(
             self.temp_dir,
             f"temp_audio_{uuid.uuid4().hex[:8]}.wav"
@@ -112,8 +194,14 @@ class AudioInputHandler:
             # 尝试直接作为wav格式读取
             with io.BytesIO(audio_bytes) as buffer:
                 wav, sr = sf.read(buffer)
+
+                # 验证读取的数据
+                if len(wav) == 0:
+                    raise ValueError("No audio data could be read from bytes")
+
                 sf.write(temp_file, wav, sr)
-        except Exception:
+        except Exception as e:
+            print(f"Warning: Could not read audio bytes as audio file: {e}")
             # 如果失败，直接写入字节（假设是有效的音频格式）
             with open(temp_file, 'wb') as f:
                 f.write(audio_bytes)
@@ -133,12 +221,22 @@ class AudioInputHandler:
         try:
             # 尝试作为音频文件读取并保存为wav
             wav, sr = sf.read(file_obj)
+
+            # 验证读取的数据
+            if len(wav) == 0:
+                raise ValueError("No audio data could be read from file object")
+
             sf.write(temp_file, wav, sr)
-        except Exception:
+        except Exception as e:
+            print(f"Warning: Could not read file object as audio: {e}")
             # 如果失败，直接复制字节
             file_obj.seek(0)
+            content = file_obj.read()
+            if len(content) == 0:
+                raise ValueError("File object is empty")
+
             with open(temp_file, 'wb') as f:
-                f.write(file_obj.read())
+                f.write(content)
 
         self._temp_files.append(temp_file)
         return temp_file
