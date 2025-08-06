@@ -1,5 +1,7 @@
 import asyncio
 import io
+import json
+import urllib
 from pathlib import Path
 from typing import Optional, Dict, List
 from datetime import datetime
@@ -438,17 +440,21 @@ class VoiceSDKClient:
         except Exception as e:
             return ApiResponse.error_response(f"下载文件失败: {str(e)}")
 
+
     def _extract_filename_from_disposition(self, content_disposition: str) -> str:
-        """从Content-Disposition头中提取文件名"""
+        """从Content-Disposition头中提取文件名（RFC 5987编码）"""
         if not content_disposition:
             return "unknown_file"
 
-        # 处理 "attachment; filename=example.txt" 格式
-        if "filename=" in content_disposition:
-            filename_part = content_disposition.split("filename=")[1]
-            # 移除可能的引号和分号后的内容
-            filename = filename_part.split(';')[0].strip().strip('"\'')
-            return filename if filename else "unknown_file"
+        # 处理 RFC 5987 编码格式: filename*=UTF-8''encoded_name
+        if "filename*=" in content_disposition:
+            filename_part = content_disposition.split("filename*=")[1]
+            if filename_part.startswith("UTF-8''"):
+                encoded_name = filename_part[7:].split(';')[0].strip()
+                try:
+                    return urllib.parse.unquote(encoded_name)
+                except Exception:
+                    return "unknown_file"
 
         return "unknown_file"
 

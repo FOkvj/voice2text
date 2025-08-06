@@ -1,6 +1,7 @@
 # ============================================================================
 # Voice2Text SDK - 更新的API实现，集成文件管理器
 # ============================================================================
+import urllib
 
 from typing import Generic, TypeVar, Optional, Any, Dict, List, Tuple
 from dataclasses import dataclass, field
@@ -495,11 +496,12 @@ class VoiceSDKServer:
                 def iter_content():
                     yield file_content
 
+                encoded_filename = urllib.parse.quote(meta.filename, safe='')
                 return StreamingResponse(
                     iter_content(),
                     media_type=meta.content_type or "application/octet-stream",
                     headers={
-                        "Content-Disposition": f"attachment; filename={meta.filename}",
+                        "Content-Disposition": f'attachment; filename*=UTF-8\'\'{encoded_filename}',
                         "Content-Length": str(meta.size)
                     }
                 )
