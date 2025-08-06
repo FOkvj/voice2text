@@ -54,6 +54,10 @@ async def example_usage():
         #
         # await client.delete_speaker_audio_sample("夏东海2", "d178f549-d74e-4437-9538-d5b0e1f53853")
         #
+        file_id =r1.data.audio_file_id
+        tmp_path = "test"
+        await client.download_file(file_id=r1.data.audio_file_id, dir=tmp_path)
+        # data = await client.get_file_stream(file_id)
         voiceprints = await client.list_voiceprints()
         if voiceprints.success:
             print(f"已注册声纹: {voiceprints.data}")

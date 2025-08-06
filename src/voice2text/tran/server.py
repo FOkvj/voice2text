@@ -1,7 +1,9 @@
 # ============================================================================
 # Voice2Text SDK - 更新的API实现，集成文件管理器
 # ============================================================================
+import mimetypes
 import urllib
+from http.client import HTTPException
 
 from typing import Generic, TypeVar, Optional, Any, Dict, List, Tuple
 from dataclasses import dataclass, field
@@ -476,41 +478,44 @@ class VoiceSDKServer:
         async def download_file(file_id: str = FastAPIPath(..., description="文件ID")):
             """下载文件"""
             try:
-                # 获取文件元数据
-                meta = self.file_manager.get_file_by_id(file_id)
-                if not meta:
-                    return ApiResponse.error_response(
-                        "文件不存在",
-                        code=ResponseCode.NOT_FOUND.value
-                    )
+                metadata, stream = await self.file_manager.load_file_stream(file_id)
 
-                # 加载文件内容
-                file_content = await self.file_manager.load_file(file_id)
-                if not file_content:
-                    return ApiResponse.error_response(
-                        "无法读取文件内容",
-                        code=ResponseCode.INTERNAL_ERROR.value
-                    )
+                if not metadata or not stream:
+                    raise HTTPException(status_code=404, detail="File not found")
 
-                # 创建流式响应
-                def iter_content():
-                    yield file_content
+                # 自动检测内容类型
+                content_type = metadata.content_type
+                if not content_type:
+                    content_type, _ = mimetypes.guess_type(metadata.filename)
+                    content_type = content_type or 'application/octet-stream'
 
-                encoded_filename = urllib.parse.quote(meta.filename, safe='')
+                # 流式生成器
+                async def stream_generator():
+                    try:
+                        chunk_size = 64 * 1024  # 64KB chunks
+                        while True:
+                            chunk = stream.read(chunk_size)
+                            if not chunk:
+                                break
+                            yield chunk
+                    finally:
+                        stream.close()
+
+                # 准备响应头
+                encoded_filename = urllib.parse.quote(metadata.filename.encode('utf-8'))
+                headers = {
+                    'Content-Length': str(metadata.size),
+                    'Content-Disposition': f'attachment; filename*=UTF-8\'\'{encoded_filename}'
+                }
+
                 return StreamingResponse(
-                    iter_content(),
-                    media_type=meta.content_type or "application/octet-stream",
-                    headers={
-                        "Content-Disposition": f'attachment; filename*=UTF-8\'\'{encoded_filename}',
-                        "Content-Length": str(meta.size)
-                    }
+                    stream_generator(),
+                    media_type=content_type,
+                    headers=headers
                 )
 
             except Exception as e:
-                return ApiResponse.error_response(
-                    f"下载文件失败: {str(e)}",
-                    code=ResponseCode.INTERNAL_ERROR.value
-                )
+                raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
 
         @self.app.delete("/api/v1/files/{file_id}")
         async def delete_file(file_id: str = FastAPIPath(..., description="文件ID")):

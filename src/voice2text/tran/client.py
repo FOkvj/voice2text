@@ -1,9 +1,12 @@
 import asyncio
 import io
 import json
+import re
 import urllib
 from pathlib import Path
-from typing import Optional, Dict, List
+
+import aiohttp
+from typing import Optional, Dict, List, Callable
 from datetime import datetime
 import aiofiles
 from pydantic import TypeAdapter
@@ -370,7 +373,7 @@ class VoiceSDKClient:
     import json
     from typing import Dict, Optional
 
-    async def get_file_stream(self, file_id: str) -> ApiResponse[io.BytesIO]:
+    async def get_file_stream(self, file_id: str) -> io.BytesIO:
         """
         下载文件流（返回BytesIO对象）
 
@@ -398,40 +401,9 @@ class VoiceSDKClient:
 
                     # 重置指针到开头
                     file_stream.seek(0)
-
-                    # 从响应头获取文件信息并添加为属性
-                    content_disposition = response.headers.get("content-disposition", "")
-                    filename = self._extract_filename_from_disposition(content_disposition)
-
-                    file_stream.filename = filename
-                    file_stream.content_type = response.headers.get("content-type", "application/octet-stream")
-                    file_stream.size = int(response.headers.get("content-length", 0))
-
-                    return ApiResponse.success_response(
-                        file_stream,
-                        "文件流获取成功"
-                    )
+                    return file_stream
                 else:
-                    # 处理错误响应（可能是JSON格式的ApiResponse）
-                    try:
-                        error_data = response.json()
-                        if isinstance(error_data, dict) and 'message' in error_data:
-                            # 这是 ApiResponse 格式的错误
-                            return ApiResponse.error_response(
-                                error_data.get('message', '下载失败'),
-                                code=error_data.get('code', response.status_code)
-                            )
-                        else:
-                            return ApiResponse.error_response(
-                                f'下载失败: HTTP {response.status_code}',
-                                code=response.status_code
-                            )
-                    except (json.JSONDecodeError, ValueError):
-                        # 响应不是JSON格式
-                        return ApiResponse.error_response(
-                            f'下载失败: HTTP {response.status_code}',
-                            code=response.status_code
-                        )
+                    return None
 
         except httpx.TimeoutException:
             return ApiResponse.error_response("下载文件超时")
@@ -458,41 +430,101 @@ class VoiceSDKClient:
 
         return "unknown_file"
 
-    async def download_file(self, file_id: str, save_path: str) -> ApiResponse[Dict]:
+    async def download_file(
+            self,
+            file_id: str,
+            local_path: str = None,
+            dir: str = None,
+            progress_callback: Optional[Callable[[int, int], None]] = None,
+            timeout: int = 300
+    ) -> bool:
         """
-        下载文件
+        优化的客户端文件下载方法
+        支持进度回调和大文件下载
 
         Args:
+            base_url: 服务器基础URL
             file_id: 文件ID
-            save_path: 保存路径
+            local_path: 本地保存路径
+            progress_callback: 进度回调函数 (downloaded_bytes, total_bytes)
+            timeout: 超时时间（秒）
+
+        Returns:
+            下载是否成功
         """
+        if local_path:
+            local_path = Path(local_path)
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+        if dir:
+            dir = Path(dir)
+            dir.mkdir(parents=True, exist_ok=True)
+
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/api/v1/files/{file_id}/download",
-                    headers={'Authorization': f'Bearer {self.api_key}'} if self.api_key else {},
-                    timeout=self.timeout
-                )
+            timeout_config = aiohttp.ClientTimeout(total=timeout)
 
-                if response.status_code == 200:
+            async with aiohttp.ClientSession(timeout=timeout_config) as session:
+                url = f"{self.base_url}/api/v1/files/{file_id}/download"
+
+                async with session.get(url) as response:
+                    if response.status != 200:
+                        print(f"Download failed with status: {response.status}")
+                        return False
+                    headers = response.headers
+
+                    # 获取文件总大小
+                    total_size = int(headers.get('Content-Length', 0))
+                    downloaded = 0
+
+                    save_path = local_path if local_path else dir.joinpath(self.extract_filename_from_headers(headers))
+                    # 异步写入文件
                     async with aiofiles.open(save_path, 'wb') as f:
-                        async for chunk in response.aiter_bytes():
+                        async for chunk in response.content.iter_chunked(64 * 1024):  # 64KB chunks
                             await f.write(chunk)
+                            downloaded += len(chunk)
 
-                    return ApiResponse.success_response(
-                        {"saved_path": save_path, "size": len(response.content)},
-                        "文件下载成功"
-                    )
-                else:
-                    error_data = response.json()
-                    return ApiResponse.error_response(
-                        error_data.get('message', '下载失败'),
-                        code=response.status_code
-                    )
+                            # 调用进度回调
+                            if progress_callback:
+                                progress_callback(downloaded, total_size)
+
+                    return True
 
         except Exception as e:
-            return ApiResponse.error_response(f"下载文件失败: {str(e)}")
+            print(f"Download failed: {e}")
+            return False
 
+    def extract_filename_from_headers(self, headers) -> str:
+        """
+        从HTTP响应头中提取文件名
+        专门处理服务端发送的 filename*=UTF-8''encoded_name 格式
+
+        Args:
+            headers: HTTP响应头（字典或对象）
+
+        Returns:
+            str: 提取的文件名，失败则返回默认名
+
+        Examples:
+            headers = {'Content-Disposition': 'attachment; filename*=UTF-8\'\'%E5%88%98%E6%98%9F_sample5.wav'}
+        """
+        # 获取 Content-Disposition 头
+        content_disposition = headers.get('Content-Disposition', '') if hasattr(headers, 'get') else headers.get(
+            'Content-Disposition', '')
+
+        if not content_disposition:
+            return "download_file"
+
+        # 匹配 filename*=UTF-8''encoded_name 格式
+        match = re.search(r"filename\*=UTF-8''([^;]+)", content_disposition)
+        if match:
+            encoded_filename = match.group(1)
+            try:
+                # URL解码得到原始文件名
+                return urllib.parse.unquote(encoded_filename)
+            except:
+                pass
+
+        # 如果匹配失败，返回默认名
+        return "download_file"
     async def delete_file(self, file_id: str) -> ApiResponse[Dict]:
         """删除文件"""
         return await self._make_request('DELETE', f'/api/v1/files/{file_id}')

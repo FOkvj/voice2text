@@ -369,6 +369,7 @@ class S3FileStorage(FileStorageInterface):
         self.session = None
         self.s3_client = None
         self.temp_dir = Path(config.temp_dir)
+        self.save_chunk_size = 1024 * 1024
 
     async def connect(self) -> None:
         """连接到S3"""
@@ -470,9 +471,19 @@ class S3FileStorage(FileStorageInterface):
                     Bucket=self.config.bucket_name,
                     Key=s3_key
                 )
-                content = await response['Body'].read()
-                return io.BytesIO(content)
-            except ClientError as e:
+                content = io.BytesIO()
+                body = response["Body"]
+
+                # Stream the data in chunks
+                while True:
+                    chunk = await body.read(self.save_chunk_size)
+                    if not chunk:
+                        break
+                    content.write(chunk)
+
+                content.seek(0)
+                return content
+            except Exception as e:
                 if e.response['Error']['Code'] == 'NoSuchKey':
                     raise FileNotFoundError(f"File not found: {path}")
                 raise
