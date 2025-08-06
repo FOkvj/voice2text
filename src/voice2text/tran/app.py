@@ -41,10 +41,10 @@ async def example_usage():
         #         else:
         #             print(f"转写失败: {result.message}")
 
-        r1 = await client.register_voiceprint_direct("刘星", "../../data/sample/刘星.mp3")
-        print(f"声纹注册结果: {r1.message}, 数据: {r1.data}")
-        # r2 = await client.transcribe_file_direct("../../data/刘星家_20231212_122300_家有儿女吃饭.mp3")
-        # print(f"转写结果: {r2.message}, 数据: {r2.data}")
+        # r1 = await client.register_voiceprint_direct("刘星xx", "../../data/sample/刘星.mp3")
+        # print(f"声纹注册结果: {r1.message}, 数据: {r1.data}")
+        r2 = await client.transcribe_file_direct(file_path="../../data/刘星家_20231212_122300_家有儿女吃饭.mp3", timeout=60000)
+        print(f"转写结果: {r2.data}")
         # 5. 获取声纹列表
         # voiceprints = await client.list_voiceprints()
         # if voiceprints.success:
@@ -54,9 +54,9 @@ async def example_usage():
         #
         # await client.delete_speaker_audio_sample("夏东海2", "d178f549-d74e-4437-9538-d5b0e1f53853")
         #
-        file_id =r1.data.audio_file_id
-        tmp_path = "test"
-        await client.download_file(file_id=r1.data.audio_file_id, dir=tmp_path)
+        # file_id =r1.data.audio_file_id
+        # tmp_path = "test"
+        # await client.download_file(file_id=r1.data.audio_file_id, dir=tmp_path)
         # data = await client.get_file_stream(file_id)
         voiceprints = await client.list_voiceprints()
         if voiceprints.success:

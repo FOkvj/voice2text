@@ -147,7 +147,7 @@ class VoiceSDKClient:
             if not transcribe_task.success:
                 return transcribe_task
 
-            task_id = transcribe_task.data['task_id']
+            task_id = transcribe_task.data.task_id
 
             # 2. 如果不等待完成，直接返回任务信息
             if not wait_for_completion:
@@ -169,11 +169,11 @@ class VoiceSDKClient:
                     {
                         "task_id": task_id,
                         "file_id": file_id,
-                        "transcript": result.data['transcript'],
-                        "audio_duration": result.data['audio_duration'],
-                        "auto_registered_speakers": result.data['auto_registered_speakers'],
-                        "voiceprint_audio_samples": result.data['voiceprint_audio_samples'],
-                        "output_file": result.data.get('output_file')
+                        "transcript": result.data.transcript,
+                        "audio_duration": result.data.audio_duration,
+                        "auto_registered_speakers": result.data.auto_registered_speakers,
+                        "voiceprint_audio_samples": result.data.voiceprint_audio_samples,
+                        "output_file": result.data.output_file
                     },
                     "转写完成"
                 )
@@ -191,7 +191,7 @@ class VoiceSDKClient:
             poll_interval: float = 1.0,
             timeout: float = 300.0,
             **transcribe_kwargs
-    ) -> ApiResponse[Dict]:
+    ) -> Dict:
         """
         直接转写文件：上传 -> 转写 -> 获取结果 一键完成
 
@@ -207,44 +207,32 @@ class VoiceSDKClient:
             如果wait_for_completion=True，返回转写结果
             如果wait_for_completion=False，返回任务信息
         """
-        try:
-            # 1. 上传文件
-            upload_result = await self.upload_audio_file(file_path, category="transcribe")
-            if not upload_result.success:
-                return upload_result
 
-            file_id = upload_result.data['file_id']
+        # 1. 上传文件
+        upload_result = await self.upload_audio_file(file_path, category="transcribe")
+        if not upload_result.success:
+            return upload_result
 
+        file_id = upload_result.data['file_id']
+
+        # 2. 使用新函数提交转写任务并获取结果
+        result = await self.submit_transcribe_and_get_result(
+            file_id=file_id,
+            wait_for_completion=wait_for_completion,
+            delete_after_processing=delete_after_processing,
+            poll_interval=poll_interval,
+            timeout=timeout,
+            **transcribe_kwargs
+        )
+
+        # 如果任务失败且不会自动删除文件，手动清理
+        if not result.success and not delete_after_processing:
             try:
-                # 2. 使用新函数提交转写任务并获取结果
-                result = await self.submit_transcribe_and_get_result(
-                    file_id=file_id,
-                    wait_for_completion=wait_for_completion,
-                    delete_after_processing=delete_after_processing,
-                    poll_interval=poll_interval,
-                    timeout=timeout,
-                    **transcribe_kwargs
-                )
+                await self.delete_file(file_id)
+            except:
+                pass
 
-                # 如果任务失败且不会自动删除文件，手动清理
-                if not result.success and not delete_after_processing:
-                    try:
-                        await self.delete_file(file_id)
-                    except:
-                        pass
-
-                return result
-
-            except Exception as e:
-                # 出错时清理上传的文件
-                try:
-                    await self.delete_file(file_id)
-                except:
-                    pass
-                return ApiResponse.error_response(f"转写过程中出错: {str(e)}")
-
-        except Exception as e:
-            return ApiResponse.error_response(f"转写文件失败: {str(e)}")
+        return result.data
     async def register_voiceprint_direct(
             self,
             person_name: str,
@@ -556,7 +544,7 @@ class VoiceSDKClient:
             if not status_response.success:
                 return status_response
 
-            task_status = status_response.data.get('status')
+            task_status = status_response.data.status
 
             if task_status == 'completed':
                 return await self.get_task_result(task_id)
