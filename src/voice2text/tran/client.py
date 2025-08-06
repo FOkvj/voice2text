@@ -355,10 +355,14 @@ class VoiceSDKClient:
         return await self._make_request('GET', '/api/v1/voiceprints/list', List[VoicePrintInfo], params=params)
 
 
-    async def rename_speaker(self, speaker_id: str, new_name: str) -> ApiResponse[Dict]:
+    async def rename_speaker(self, speaker_id: str, new_name: str) -> bool:
         """重命名说话人"""
         params = {'new_name': new_name}
-        return await self._make_request('PUT', f'/api/v1/speakers/{speaker_id}/rename', Dict, params=params)
+        response = await self._make_request('PUT', f'/api/v1/speakers/{speaker_id}/rename', Dict, params=params)
+        if response.success:
+            return True
+        else:
+            return False
 
     async def delete_speaker(self, speaker_id: str) -> bool:
         """删除说话人"""
