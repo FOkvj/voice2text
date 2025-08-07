@@ -93,7 +93,7 @@ class VoicePrintRecord:
             embedding=np.array(data['embedding']),
             sample_number=data['sample_number'],
             audio_duration=data['audio_duration'],
-            created_at=datetime.fromisoformat(data['created_at']),
+            created_at=data['created_at'],
             metadata=data.get('metadata', {})
         )
 
@@ -379,7 +379,7 @@ class ChromaDBImplementation(VectorDatabaseInterface):
                         embedding=None,
                         sample_number=metadata['sample_number'],
                         audio_duration=metadata['audio_duration'],
-                        created_at=datetime.fromisoformat(metadata['created_at']),
+                        created_at=metadata['created_at'],
                         metadata={k: v for k, v in metadata.items()
                                   if k not in ['speaker_id', 'sample_number', 'audio_duration', 'created_at']}
                     )
@@ -437,7 +437,7 @@ class ChromaDBImplementation(VectorDatabaseInterface):
                         embedding=embedding,
                         sample_number=metadata['sample_number'],
                         audio_duration=metadata['audio_duration'],
-                        created_at=datetime.fromisoformat(metadata['created_at']),
+                        created_at=metadata['created_at'],
                         metadata={k: v for k, v in metadata.items()
                                   if k not in ['speaker_id', 'sample_number', 'audio_duration', 'created_at']}
                     )
@@ -467,9 +467,14 @@ class ChromaDBImplementation(VectorDatabaseInterface):
             if 'metadata' in updates:
                 existing_record.metadata.update(updates['metadata'])
 
-            # 删除旧记录并插入新记录
-            result = await self.insert_vector(existing_record)
-            self.collection.delete(ids=[vector_id])
+            result = self.collection.upsert(ids=[vector_id], embeddings=[existing_record.embedding.tolist()],
+                                   metadatas=[{
+                                       'speaker_id': existing_record.speaker_id,
+                                       'sample_number': existing_record.sample_number,
+                                       'audio_duration': existing_record.audio_duration,
+                                       'created_at': existing_record.created_at,
+                                       **existing_record.metadata
+                                   }])
             return result
 
 
@@ -699,7 +704,7 @@ class MilvusImplementation(VectorDatabaseInterface):
                 [record.embedding.tolist()],
                 [record.sample_number],
                 [record.audio_duration],
-                [record.created_at.isoformat()],
+                [record.created_at],
                 [json.dumps(record.metadata)]
             ]
 
@@ -826,7 +831,7 @@ class MilvusImplementation(VectorDatabaseInterface):
                             embedding=None,  # 搜索时不返回embedding以节省内存
                             sample_number=hit.entity.get("sample_number"),
                             audio_duration=hit.entity.get("audio_duration"),
-                            created_at=datetime.fromisoformat(hit.entity.get("created_at")),
+                            created_at=hit.entity.get("created_at"),
                             metadata=metadata
                         )
                         similar_vectors.append((record, similarity))
@@ -863,7 +868,7 @@ class MilvusImplementation(VectorDatabaseInterface):
                     embedding=np.array(result["embedding"]),
                     sample_number=result["sample_number"],
                     audio_duration=result["audio_duration"],
-                    created_at=datetime.fromisoformat(result["created_at"]),
+                    created_at=result["created_at"],
                     metadata=metadata
                 )
 
@@ -897,7 +902,7 @@ class MilvusImplementation(VectorDatabaseInterface):
                     embedding=np.array(result["embedding"]),
                     sample_number=result["sample_number"],
                     audio_duration=result["audio_duration"],
-                    created_at=datetime.fromisoformat(result["created_at"]),
+                    created_at=result["created_at"],
                     metadata=metadata
                 )
                 records.append(record)

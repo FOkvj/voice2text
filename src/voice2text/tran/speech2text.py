@@ -199,12 +199,151 @@ class EcapaTdnnModel(SpeakerModel):
         return self._model is not None
 
 
+def preprocess_audio_in_memory(input_path, target_sample_rate=16000):
+    """在内存中预处理音频数据"""
+    import torchaudio
+    import torch
+
+    waveform, sr = torchaudio.load(input_path)
+
+    # 重采样
+    if sr != target_sample_rate:
+        resampler = torchaudio.transforms.Resample(sr, target_sample_rate)
+        waveform = resampler(waveform)
+
+    # 转换为单声道
+    if waveform.shape[0] > 1:
+        waveform = torch.mean(waveform, dim=0, keepdim=True)
+
+    return {
+        "waveform": waveform,
+        "sample_rate": target_sample_rate
+    }
+
+@dataclass
+class WhisperConfig(ModelConfig):
+    """Whisper模型配置"""
+    language: Optional[str] = None
+    task: str = "transcribe"
+    diarize_model_path: str = "pyannote/speaker-diarization-3.1"
+    use_auth_token: Optional[str] = None
+
+
+class WhisperModel(ASRModel):
+    """Whisper模型实现"""
+
+    def __init__(self, config: WhisperConfig):
+        super().__init__(config)
+        self.whisper_config = config
+        self.diarize_model = None
+
+    def load_model(self) -> None:
+        """加载Whisper模型"""
+        try:
+            import whisper
+
+            self._model = whisper.load_model(
+                self.whisper_config.model_name
+            ).to(self.config.device)
+
+            # 加载说话人分离模型
+            self._load_diarize_model()
+
+            print(f"Successfully loaded Whisper model: {self.whisper_config.model_name}")
+        except Exception as e:
+            print(f"Error loading Whisper model: {e}")
+            raise
+
+    def _load_diarize_model(self):
+        """加载说话人分离模型"""
+        try:
+            from pyannote.audio import Pipeline
+            import torch
+            import os
+
+            auth_token = self.whisper_config.use_auth_token or os.getenv("HF_TOKEN")
+            self.diarize_model = Pipeline.from_pretrained(
+                self.whisper_config.diarize_model_path,
+                use_auth_token=auth_token
+            )
+
+            if self.config.device != "cpu":
+                self.diarize_model.to(torch.device(self.config.device))
+
+            print("Successfully loaded diarization model")
+        except Exception as e:
+            print(f"Error loading diarization model: {e}")
+            self.diarize_model = None
+
+    def transcribe(self, audio_path: str, **kwargs) -> Dict[str, Any]:
+        """使用Whisper转写音频"""
+        if not self.is_loaded():
+            raise RuntimeError("Model not loaded")
+
+        # 使用Whisper进行转写
+        result = self._model.transcribe(audio_path)
+        segments = result["segments"]
+
+        # 执行说话人分离
+        diarize_segments = None
+        if self.diarize_model:
+            try:
+                diarize_segments = self.diarize_model(preprocess_audio_in_memory(audio_path))
+            except Exception as e:
+                print(f"Diarization failed: {e}")
+
+        # 将结果转换为统一格式
+        sentence_info = []
+        if segments:
+            for i, segment in enumerate(segments):
+                # 分配说话人ID
+                speaker_id = f"spk_{i}"
+                if diarize_segments:
+                    # 找到与当前segment时间重叠最多的diarization segment
+                    seg_start = segment.get('start', 0)
+                    seg_end = segment.get('end', 0)
+
+                    best_match_speaker = None
+                    max_overlap = 0
+
+                    for diar_segment, _, speaker in diarize_segments.itertracks(yield_label=True):
+                        diar_start = diar_segment.start
+                        diar_end = diar_segment.end
+
+                        overlap_start = max(seg_start, diar_start)
+                        overlap_end = min(seg_end, diar_end)
+                        overlap_duration = max(0, overlap_end - overlap_start)
+
+                        if overlap_duration > max_overlap:
+                            max_overlap = overlap_duration
+                            best_match_speaker = speaker
+
+                    if best_match_speaker:
+                        speaker_id = best_match_speaker
+
+                sentence_info.append({
+                    'spk': speaker_id,
+                    'start': int(segment.get('start', 0) * 1000),  # 转换为毫秒
+                    'end': int(segment.get('end', 0) * 1000),  # 转换为毫秒
+                    'text': segment.get('text', '').strip()
+                })
+
+        return {
+            'text': result.get('text', ''),
+            'sentence_info': sentence_info,
+            'timestamp': [[0, int(segments[-1]['end'] * 1000)]] if segments else []
+        }
+
+    def is_loaded(self) -> bool:
+        return self._model is not None
+
+
 class ModelFactory:
     """模型工厂类"""
 
     _asr_models = {
         ASRModelType.FUNASR: FunASRModel,
-        # ASRModelType.WHISPER: WhisperModel,
+        ASRModelType.WHISPER: WhisperModel,
     }
 
     _speaker_models = {
@@ -239,20 +378,44 @@ class ModelFactory:
         """注册新的说话人识别模型"""
         cls._speaker_models[model_type] = model_class
 
+class TranscriptionStrategy(Enum):
+    """转写策略枚举"""
+    AUTO_SELECT = "auto_select"  # 根据语言自动选择
+    FUNASR_ONLY = "funasr_only"  # 仅使用FunASR
+    WHISPER_ONLY = "whisper_only"  # 仅使用Whisper
+    HYBRID = "hybrid"  # 混合策略
+
+
 @dataclass
 class STTServiceConfig:
     """集成向量数据库的服务配置"""
     # ASR配置
-    asr_config: Any  # ModelConfig
+    asr_config: Any  # FunASRConfig
+
+
 
     # 说话人识别配置
     speaker_config: Any  # SpeakerConfig
 
     # 向量数据库配置
-    vector_db_config:VectorDBConfig
+    vector_db_config: VectorDBConfig
 
     # 文件存储配置
-    storage_config: StorageConfig  # S3配置（如果使用S3存储）
+    storage_config: StorageConfig
+
+    # 转写策略配置 (新增)
+    transcription_strategy: TranscriptionStrategy = TranscriptionStrategy.AUTO_SELECT
+
+    # 语言策略映射 (新增)
+    language_model_mapping: Dict[str, str] = field(default_factory=lambda: {
+        "auto": "whisper",
+        "zh": "funasr",
+        "en": "whisper",
+        "ja": "whisper",
+        "ko": "whisper"
+    })
+    # Whisper配置 (新增)
+    whisper_config: Optional[WhisperConfig] = None
 
     # 音频处理配置
     target_sr: int = 16000
@@ -269,14 +432,13 @@ class STTServiceConfig:
     cluster_config: Optional[Dict[str, Any]] = None
 
 
-
-
-
 @dataclass
 class WhisperConfig(ModelConfig):
     """Whisper模型配置"""
     language: Optional[str] = None
     task: str = "transcribe"
+    diarize_model_path: str = "pyannote/speaker-diarization-3.1"
+    use_auth_token: Optional[str] = None
 
 
 
@@ -805,7 +967,6 @@ class VoiceTaskManager(AsyncTaskManager):
 
 
 import asyncio
-import os
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
 from voice2text.tran.voiceprint_manager_v2 import (
@@ -822,31 +983,29 @@ class STTAsyncVoice2TextService:
 
     def __init__(self, config: STTServiceConfig):
         self.config = config
-        self.logger = logging.getLogger(f"{__name__}.VectorAsyncVoice2TextService")
+        self.logger = logging.getLogger(f"{__name__}.STTAsyncVoice2TextServicee")
 
         # 初始化组件（在initialize中异步初始化）
         self.file_manager: ImprovedFileManager = None
         self.asr_model = None
+        self.whisper_model = None  # 新增Whisper模型
         self.speaker_model = None
-        self.voice_print_manager: VectorEnhancedVoicePrintManager  = None
+        self.voice_print_manager: VectorEnhancedVoicePrintManager = None
         self.task_manager = None
 
         # 存储配置
         self.storage_config = config.storage_config
 
-        # 音频处理器
-        self.audio_handler = None
-
 
     async def initialize(self):
         """异步初始化服务"""
-        self.logger.info("Initializing VectorAsyncVoice2TextService...")
+        self.logger.info("Initializing STTAsyncVoice2TextService...")
 
         # 初始化文件管理器
         await self._initialize_file_manager()
 
         # 初始化模型
-        await self._initialize_models()
+        self._initialize_models()
 
         # 初始化向量增强的声纹管理器
         await self._initialize_vector_voiceprint_manager()
@@ -854,7 +1013,7 @@ class STTAsyncVoice2TextService:
         # 初始化任务管理器
         await self._initialize_task_manager()
 
-        self.logger.info("VectorAsyncVoice2TextService initialized successfully")
+        self.logger.info("STTAsyncVoice2TextService initialized successfully")
 
     async def _initialize_file_manager(self):
         """异步初始化文件管理器"""
@@ -869,27 +1028,29 @@ class STTAsyncVoice2TextService:
 
         self.logger.info("File manager initialized successfully")
 
-    async def _initialize_models(self):
+    def _initialize_models(self):
         """初始化ASR和说话人模型"""
         self.logger.info("Initializing models...")
 
-        # 导入必要的类
-
-        # 创建ASR模型
+        # 创建FunASR模型
         asr_type = ASRModelType(self.config.asr_config.model_type)
         self.asr_model = ModelFactory.create_asr_model(asr_type, self.config.asr_config)
 
-        # 在线程池中加载模型以避免阻塞
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self.asr_model.load_model)
+        self.asr_model.load_model()
+
+        # 创建Whisper模型 (如果配置了)
+        if self.config.whisper_config:
+            whisper_type = ASRModelType.WHISPER
+            self.whisper_model = ModelFactory.create_asr_model(whisper_type, self.config.whisper_config)
+            self.whisper_model.load_model()
+            self.logger.info("Whisper model initialized")
 
         # 创建说话人识别模型
         speaker_type = SpeakerModelType(self.config.speaker_config.model_type)
         self.speaker_model = ModelFactory.create_speaker_model(speaker_type, self.config.speaker_config)
-        await loop.run_in_executor(None, self.speaker_model.load_model)
+        self.speaker_model.load_model()
 
         self.logger.info("Models initialized successfully")
-
     async def _initialize_vector_voiceprint_manager(self):
         """初始化向量增强的声纹管理器"""
         self.logger.info("Initializing vector-enhanced voiceprint manager...")
@@ -923,11 +1084,11 @@ class STTAsyncVoice2TextService:
         """启动服务"""
         await self.initialize()
         await self.task_manager.start()
-        self.logger.info("VectorAsyncVoice2TextService started")
+        self.logger.info("STTAsyncVoice2TextService started")
 
     async def stop(self):
         """停止服务"""
-        self.logger.info("Stopping VectorAsyncVoice2TextService...")
+        self.logger.info("Stopping STTAsyncVoice2TextService...")
 
         if self.task_manager:
             await self.task_manager.stop()
@@ -944,7 +1105,32 @@ class STTAsyncVoice2TextService:
         if self.audio_handler:
             self.audio_handler.cleanup_temp_files()
 
-        self.logger.info("VectorAsyncVoice2TextService stopped")
+        self.logger.info("STTAsyncVoice2TextService stopped")
+
+    def _select_asr_model(self, language: Optional[str] = None) -> ASRModel:
+        """根据策略选择ASR模型"""
+        if self.config.transcription_strategy == TranscriptionStrategy.FUNASR_ONLY:
+            return self.asr_model
+        elif self.config.transcription_strategy == TranscriptionStrategy.WHISPER_ONLY:
+            if not self.whisper_model:
+                raise RuntimeError("Whisper model not configured but WHISPER_ONLY strategy selected")
+            return self.whisper_model
+        elif self.config.transcription_strategy == TranscriptionStrategy.AUTO_SELECT:
+            # 根据语言选择模型
+            if language:
+                preferred_model = self.config.language_model_mapping.get(language, "funasr")
+                if preferred_model == "whisper" and self.whisper_model:
+                    self.logger.info(f"Using Whisper for language: {language}")
+                    return self.whisper_model
+                else:
+                    self.logger.info(f"Using FunASR for language: {language}")
+                    return self.asr_model
+            else:
+                # 默认使用FunASR
+                return self.asr_model
+        else:
+            # 默认使用FunASR
+            return self.asr_model
 
     # ==================== 核心转写方法 ====================
 
@@ -953,15 +1139,17 @@ class STTAsyncVoice2TextService:
                                     threshold: float = None,
                                     auto_register_unknown: bool = True,
                                     priority: int = 5,
+                                    language: Optional[str] = None,  # 新增语言参数
                                     **kwargs) -> str:
         """
-        异步转写音频（支持多种输入格式）
+        异步转写音频（支持多种输入格式和转写引擎）
 
         Args:
             audio_input: 音频输入（文件路径、字节数据或文件对象）
             threshold: 识别阈值
             auto_register_unknown: 是否自动注册未知说话人
             priority: 任务优先级
+            language: 语言代码 ("auto", "zh", "en", etc.)
             **kwargs: 其他参数
 
         Returns:
@@ -973,6 +1161,7 @@ class STTAsyncVoice2TextService:
                 audio_input,
                 threshold,
                 auto_register_unknown,
+                language,  # 传递语言参数
                 kwargs
             )
 
@@ -986,23 +1175,24 @@ class STTAsyncVoice2TextService:
             metadata={
                 'audio_input': input_description,
                 'threshold': threshold,
-                'auto_register': auto_register_unknown
+                'auto_register': auto_register_unknown,
+                'language': language
             }
         )
 
-        self.logger.info(f"Submitted transcribe task {task_id} for input: {input_description}")
+        self.logger.info(f"Submitted transcribe task {task_id} for input: {input_description}, language: {language}")
         return task_id
-
     async def _async_transcribe_file(self,
                                      audio_input: Union[str, bytes, BinaryIO],
                                      threshold: float = None,
                                      auto_register_unknown: bool = True,
+                                     language: Optional[str] = None,
                                      kwargs: Dict = None) -> Dict[str, Any]:
-        """异步转写方法（支持多种输入格式）"""
+        """异步转写方法（支持多种输入格式和转写引擎）"""
         kwargs = kwargs or {}
         input_desc = self._get_input_description(audio_input)
 
-        self.logger.info(f"Starting transcription for: {input_desc}")
+        self.logger.info(f"Starting transcription for: {input_desc}, language: {language}")
 
         if threshold is None:
             threshold = self.config.speaker_config.threshold
@@ -1012,11 +1202,14 @@ class STTAsyncVoice2TextService:
         file_date = kwargs.get('file_date', '未知日期')
         file_time = kwargs.get('file_time', '未知时间')
 
-        # 准备音频文件路径（ASR模型可能需要文件路径）
         try:
+            # 选择ASR模型
+            selected_model = self._select_asr_model(language)
+            model_name = "Whisper" if selected_model == self.whisper_model else "FunASR"
+            self.logger.info(f"Using {model_name} for transcription")
 
             # ASR转写
-            asr_result = self.asr_model.transcribe(audio_input, **kwargs)
+            asr_result = selected_model.transcribe(audio_input, **kwargs)
 
             # 处理转写结果
             transcript = ""
@@ -1038,7 +1231,8 @@ class STTAsyncVoice2TextService:
                     full_text, audio_duration, file_location, file_date, file_time
                 )
 
-                self.logger.info(f"Single speaker transcription completed, duration: {audio_duration:.2f}s")
+                self.logger.info(
+                    f"Single speaker transcription completed with {model_name}, duration: {audio_duration:.2f}s")
             else:
                 # 多说话人处理
                 sentence_segments = asr_result['sentence_info']
@@ -1056,12 +1250,12 @@ class STTAsyncVoice2TextService:
                 diarize_segments = pd.DataFrame(segments_data)
 
                 self.logger.info(
-                    f"Multi-speaker transcription, {len(diarize_segments)} segments, duration: {audio_duration:.2f}s")
+                    f"Multi-speaker transcription with {model_name}, {len(diarize_segments)} segments, duration: {audio_duration:.2f}s")
 
-                # 使用原始音频输入进行说话人识别（避免重复的临时文件创建）
+                # 使用原始音频输入进行说话人识别
                 speaker_mapping, auto_registered, voiceprint_samples = await self.voice_print_manager.identify_speakers(
                     diarize_segments,
-                    audio_input,  # 传递原始输入
+                    audio_input,
                     threshold=threshold,
                     auto_register=auto_register_unknown
                 )
@@ -1080,20 +1274,20 @@ class STTAsyncVoice2TextService:
             if auto_registered_speakers:
                 self._log_auto_registered_info(auto_registered_speakers)
 
-            self.logger.info(f"Transcription completed successfully for: {input_desc}")
+            self.logger.info(f"Transcription completed successfully with {model_name} for: {input_desc}")
 
             return {
                 "transcript": transcript,
                 "auto_registered_speakers": auto_registered_speakers,
                 "voiceprint_audio_samples": voiceprint_audio_samples,
                 "audio_duration": audio_duration,
-                "output_file": output_file
+                "output_file": output_file,
+                "model_used": model_name  # 新增返回使用的模型信息
             }
 
         except Exception as e:
             self.logger.error(f"Transcription failed for {input_desc}: {e}")
             raise
-
     # ==================== 声纹管理方法 ====================
 
     async def register_voice_async(self,
@@ -1113,61 +1307,6 @@ class STTAsyncVoice2TextService:
     async def get_speaker_statistics_async(self) -> Dict[str, Any]:
         """异步获取说话人统计信息"""
         return await self.voice_print_manager.get_speaker_statistics()
-
-    # ==================== 搜索和相似度方法 ====================
-
-    async def search_similar_voices(self,
-                                    audio_input: Union[str, bytes, BinaryIO],
-                                    top_k: int = 10,
-                                    threshold: float = 0.5) -> List[Tuple[str, float]]:
-        """
-        搜索相似的声纹（支持多种输入格式）
-
-        Args:
-            audio_input: 音频输入（文件路径、字节数据或文件对象）
-            top_k: 返回最相似的前k个
-            threshold: 相似度阈值
-
-        Returns:
-            相似声纹列表
-        """
-        try:
-            input_desc = self._get_input_description(audio_input)
-            self.logger.info(f"Searching similar voices for: {input_desc}")
-
-            async with AudioInputHandler() as audio_handler:
-                # 加载音频并提取特征
-                wav, sr = audio_handler.load_audio_data(audio_input, self.config.target_sr)
-
-                # 裁剪音频长度
-                max_length = self.config.speaker_config.max_voiceprint_length
-                if len(wav) > max_length * sr:
-                    wav = wav[:int(max_length * sr)]
-
-                # 在线程池中提取嵌入向量
-                loop = asyncio.get_event_loop()
-                embedding = await loop.run_in_executor(
-                    None,
-                    self.speaker_model.encode_audio,
-                    wav
-                )
-
-                # 在向量数据库中搜索
-                similar_vectors = await self.voice_print_manager.vector_db.search_similar_vectors(
-                    query_vector=embedding,
-                    top_k=top_k,
-                    threshold=threshold
-                )
-
-                # 整理结果
-                results = [(record.speaker_id, similarity) for record, similarity in similar_vectors]
-
-                self.logger.info(f"Found {len(results)} similar voices for: {input_desc}")
-                return results
-
-        except Exception as e:
-            self.logger.error(f"Error searching similar voices for {input_desc}: {e}")
-            return []
 
     # ==================== 批量处理方法 ====================
 
@@ -1409,6 +1548,19 @@ class STTAsyncVoice2TextService:
 
     # ==================== 私有辅助方法 ====================
 
+    def set_transcription_strategy(self, strategy: TranscriptionStrategy):
+        """设置转写策略"""
+        self.config.transcription_strategy = strategy
+        self.logger.info(f"Transcription strategy changed to: {strategy.value}")
+
+    def update_language_mapping(self, language: str, model: str):
+        """更新语言-模型映射"""
+        if model not in ["whisper", "funasr"]:
+            raise ValueError("Model must be 'whisper' or 'funasr'")
+
+        self.config.language_model_mapping[language] = model
+        self.logger.info(f"Language mapping updated: {language} -> {model}")
+
     def _get_input_description(self, audio_input: Union[str, bytes, BinaryIO]) -> str:
         """获取音频输入的描述"""
         if isinstance(audio_input, str):
@@ -1564,16 +1716,20 @@ class STTConfigFactory:
 
     @staticmethod
     def create_whisper_config(
-            model_name: str = "base",
+            model_name: str = "large-v3-turbo",
             device: str = "cpu",
-            language: Optional[str] = None
+            language: Optional[str] = None,
+            diarize_model_path: str = "pyannote/speaker-diarization-3.1",
+            use_auth_token: Optional[str] = None
     ) -> WhisperConfig:
         """创建Whisper配置"""
         return WhisperConfig(
             model_type=ASRModelType.WHISPER.value,
             model_name=model_name,
             device=device,
-            language=language
+            language=language,
+            diarize_model_path=diarize_model_path,
+            use_auth_token=use_auth_token
         )
 
     @staticmethod
@@ -1596,19 +1752,34 @@ class STTConfigFactory:
             speaker_config,
             vector_db_config: VectorDBConfig,
             storage_config: StorageConfig,
+            whisper_config: Optional[WhisperConfig] = None,  # 新增
+            transcription_strategy: TranscriptionStrategy = TranscriptionStrategy.AUTO_SELECT,  # 新增
+            language_model_mapping: Optional[Dict[str, str]] = None,  # 新增
             **kwargs
     ) -> STTServiceConfig:
         """创建向量服务配置"""
 
-
         if vector_db_config is None:
             vector_db_config = {}
 
+        # 设置默认语言映射
+        if language_model_mapping is None:
+            language_model_mapping = {
+                "auto": "whisper",
+                "zh": "funasr",
+                "en": "whisper",
+                "ja": "whisper",
+                "ko": "whisper"
+            }
+
         return STTServiceConfig(
             asr_config=asr_config,
+            whisper_config=whisper_config,
             speaker_config=speaker_config,
             vector_db_config=vector_db_config,
             storage_config=storage_config,
+            transcription_strategy=transcription_strategy,
+            language_model_mapping=language_model_mapping,
             **kwargs
         )
 

@@ -116,6 +116,7 @@ class TranscribeRequest:
     priority: int = 5
     batch_size_s: int = 300
     hotword: str = ""
+    language: Optional[str] = "auto"
     delete_after_processing: bool = True  # 新增：处理后是否删除文件
 
 

@@ -2,6 +2,8 @@
 # Voice2Text SDK - 更新的API实现，集成文件管理器
 # ============================================================================
 import mimetypes
+import os
+import tempfile
 import urllib
 from http.client import HTTPException
 
@@ -15,7 +17,7 @@ from voice2text.tran.filesystem import StorageType, S3StorageConfig
 from voice2text.tran.schema.dto import ServiceStatus, ApiResponse, ResponseCode, FileUploadResult, TranscribeRequest, \
     TaskInfo, TranscribeResult, VoiceprintRegisterRequest, VoicePrintInfo, SpeakerStatistics
 from voice2text.tran.schema.prints import SampleInfo
-from voice2text.tran.speech2text import STTAsyncVoice2TextService, STTConfigFactory
+from voice2text.tran.speech2text import STTAsyncVoice2TextService, STTConfigFactory, TranscriptionStrategy
 
 # ============================================================================
 # FastAPI服务端实现
@@ -187,6 +189,11 @@ class VoiceSDKServer:
             try:
                 # 获取文件元数据
                 meta, input_data = await self.file_manager.load_file_stream(request.audio_file_id)
+                tmp_path = f"{tempfile.gettempdir()}/{meta.filename}" if meta else None
+                if input_data and tmp_path:
+                    async with aiofiles.open(tmp_path, 'wb') as f:
+                        await f.write(input_data.read())
+
                 if not meta:
                     return ApiResponse.error_response(
                         "文件不存在",
@@ -212,11 +219,12 @@ class VoiceSDKServer:
 
                 # 提交异步任务
                 task_id = await self.voice_service.transcribe_file_async(
-                    audio_input=input_data,
+                    audio_input=tmp_path,
                     threshold=request.threshold,
                     auto_register_unknown=request.auto_register_unknown,
                     priority=request.priority,
                     batch_size_s=request.batch_size_s,
+                    language=request.language,
                     hotword=request.hotword,
                     file_location=file_location,
                     file_date=file_date,
@@ -226,6 +234,13 @@ class VoiceSDKServer:
                         "delete_after_processing": request.delete_after_processing
                     }
                 )
+
+                # # 删除临时文件
+                # if tmp_path:
+                #     try:
+                #         os.remove(tmp_path)
+                #     except Exception as e:
+                #         print(f"删除临时文件失败: {e}")
 
                 # 获取任务信息
                 task_info = self.voice_service.task_manager.get_task_status(task_id)
@@ -319,12 +334,18 @@ class VoiceSDKServer:
             """注册声纹"""
             try:
                 # 获取文件元数据
-                meta, input_data = await self.file_manager.load_file(request.audio_file_id)
+                meta, input_data = await self.file_manager.load_file_stream(request.audio_file_id)
                 if not meta:
                     return ApiResponse.error_response(
                         "文件不存在",
                         code=ResponseCode.NOT_FOUND.value
                     )
+                tmp_path = f"{tempfile.gettempdir()}/{meta.filename}"
+                if input_data:
+                    async with aiofiles.open(tmp_path, 'wb') as f:
+                        await f.write(input_data.read())
+
+
 
                 # 验证文件分类
                 if meta.category != "voiceprint":
@@ -336,8 +357,13 @@ class VoiceSDKServer:
                 # 提交声纹注册任务
                 sample_info: SampleInfo = await self.voice_service.register_voice_async(
                     request.person_name,
-                    input_data
+                    tmp_path
                 )
+                # 删除临时文件
+                try:
+                    os.remove(tmp_path)
+                except Exception as e:
+                    print(f"删除临时文件失败: {e}")
 
                 return ApiResponse[SampleInfo].success_response(
                     sample_info,
@@ -589,6 +615,12 @@ async def start_server():
         device="cpu"
     )
 
+    whisper_config = STTConfigFactory.create_whisper_config(
+        model_name="large-v3-turbo",
+        device="cpu",
+        use_auth_token=os.getenv("HF_TOKEN")  # 需要设置Hugging Face token
+    )
+
     speaker_config = STTConfigFactory.create_speaker_config(
         threshold=0.5,
         device="cpu"
@@ -608,9 +640,17 @@ async def start_server():
     # 创建向量服务配置
     service_config = STTConfigFactory.create_stt_service_config(
         asr_config=asr_config,
+        whisper_config=whisper_config,
         speaker_config=speaker_config,
         vector_db_config=vector_db_config,
         storage_config=s3_config,
+        transcription_strategy=TranscriptionStrategy.AUTO_SELECT,  # 自动选择策略
+        language_model_mapping={  # 自定义语言映射
+            "auto": "whisper",
+            "zh": "funasr",
+            "en": "whisper",
+            "ja": "whisper"
+        },
         max_transcribe_concurrent=2,
         max_speaker_concurrent=3,
         task_timeout=300.0

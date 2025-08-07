@@ -314,7 +314,7 @@ class VectorEnhancedVoicePrintManager:
                         )
                         speaker_identities[speaker] = new_speaker_id
                         auto_registered_speakers[new_speaker_id] = {
-                            'original_id': speaker,
+                            'original_id': int(speaker),
                             'audio_length': float(audio_duration),
                             'sample_id': sample_id
                         }
@@ -615,6 +615,7 @@ class VectorEnhancedVoicePrintManager:
         Returns:
             Tuple[np.ndarray, int]: (音频数据, 采样率)
         """
+
         if isinstance(audio_input, str):
             # 文件路径
             wav, sr = librosa.load(audio_input, sr=target_sr, mono=True)
