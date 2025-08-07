@@ -410,7 +410,7 @@ class STTServiceConfig:
     language_model_mapping: Dict[str, str] = field(default_factory=lambda: {
         "auto": "whisper",
         "zh-CN": "funasr",
-        "en": "whisper",
+        "en-US": "whisper",
         "ja": "whisper",
         "ko": "whisper"
     })
@@ -1129,8 +1129,8 @@ class STTAsyncVoice2TextService:
                 # 默认使用FunASR
                 return self.asr_model
         else:
-            # 默认使用FunASR
-            return self.asr_model
+            # 默认使用Whisper
+            return self.whisper_model
 
     # ==================== 核心转写方法 ====================
 
