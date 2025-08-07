@@ -186,7 +186,7 @@ class VoiceSDKServer:
             """提交音频转写任务"""
             try:
                 # 获取文件元数据
-                meta, input_data = await self.file_manager.load_file(request.audio_file_id)
+                meta, input_data = await self.file_manager.load_file_stream(request.audio_file_id)
                 if not meta:
                     return ApiResponse.error_response(
                         "文件不存在",
@@ -272,7 +272,7 @@ class VoiceSDKServer:
                     metadata=progress.get("metadata", {})
                 )
 
-                return ApiResponse.success_response(task_dto.__dict__)
+                return ApiResponse.success_response(task_dto)
 
             except Exception as e:
                 return ApiResponse.error_response(
@@ -300,13 +300,13 @@ class VoiceSDKServer:
                 # 转换为标准DTO
                 result_dto = TranscribeResult(
                     transcript=result["transcript"],
-                    audio_duration=result["audio_duration"],
+                    audio_duration=float(result["audio_duration"]),
                     auto_registered_speakers=result["auto_registered_speakers"],
                     voiceprint_audio_samples=result["voiceprint_audio_samples"],
                     output_file=result.get("output_file")
                 )
 
-                return ApiResponse.success_response(result_dto.__dict__)
+                return ApiResponse.success_response(result_dto)
 
             except Exception as e:
                 return ApiResponse.error_response(

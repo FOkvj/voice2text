@@ -809,7 +809,7 @@ import os
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
 from voice2text.tran.voiceprint_manager_v2 import (
-    create_vector_voiceprint_manager, AudioInputHandler, VectorEnhancedVoicePrintManager
+    create_vector_voiceprint_manager, VectorEnhancedVoicePrintManager
 )
 from voice2text.tran.vector_base import VectorDBType
 
@@ -841,9 +841,6 @@ class STTAsyncVoice2TextService:
     async def initialize(self):
         """异步初始化服务"""
         self.logger.info("Initializing VectorAsyncVoice2TextService...")
-
-        # 初始化音频处理器
-        self.audio_handler = AudioInputHandler()
 
         # 初始化文件管理器
         await self._initialize_file_manager()
@@ -1016,100 +1013,86 @@ class STTAsyncVoice2TextService:
         file_time = kwargs.get('file_time', '未知时间')
 
         # 准备音频文件路径（ASR模型可能需要文件路径）
-        async with AudioInputHandler() as audio_handler:
-            audio_file_path, is_temp = audio_handler.prepare_audio_input(
-                audio_input, self.config.target_sr
-            )
+        try:
 
-            try:
-                self.logger.debug(f"Processing audio file: {audio_file_path} (temp: {is_temp})")
+            # ASR转写
+            asr_result = self.asr_model.transcribe(audio_input, **kwargs)
 
-                # ASR转写
-                asr_result = self.asr_model.transcribe(audio_file_path, **kwargs)
+            # 处理转写结果
+            transcript = ""
+            auto_registered_speakers = {}
+            voiceprint_audio_samples = {}
+            audio_duration = 0.0
 
-                # 处理转写结果
-                transcript = ""
-                auto_registered_speakers = {}
-                voiceprint_audio_samples = {}
-                audio_duration = 0.0
+            if 'sentence_info' not in asr_result or not asr_result['sentence_info']:
+                # 单说话人处理
+                full_text = asr_result['text']
+                timestamps = asr_result.get('timestamp', [])
 
-                if 'sentence_info' not in asr_result or not asr_result['sentence_info']:
-                    # 单说话人处理
-                    full_text = asr_result['text']
-                    timestamps = asr_result.get('timestamp', [])
-
-                    if timestamps:
-                        audio_duration = timestamps[-1][1] / 1000.0
-                    else:
-                        audio_duration = len(full_text) / 10  # 简单估算
-
-                    transcript = self._format_single_speaker_output(
-                        full_text, audio_duration, file_location, file_date, file_time
-                    )
-
-                    self.logger.info(f"Single speaker transcription completed, duration: {audio_duration:.2f}s")
+                if timestamps:
+                    audio_duration = timestamps[-1][1] / 1000.0
                 else:
-                    # 多说话人处理
-                    sentence_segments = asr_result['sentence_info']
-                    audio_duration = max(seg['end'] for seg in sentence_segments) / 1000.0
+                    audio_duration = len(full_text) / 10  # 简单估算
 
-                    # 转换为DataFrame
-                    segments_data = []
-                    for segment in sentence_segments:
-                        segments_data.append({
-                            'speaker': segment['spk'],
-                            'start': segment['start'] / 1000.0,
-                            'end': segment['end'] / 1000.0,
-                            'text': segment['text']
-                        })
-                    diarize_segments = pd.DataFrame(segments_data)
+                transcript = self._format_single_speaker_output(
+                    full_text, audio_duration, file_location, file_date, file_time
+                )
 
-                    self.logger.info(
-                        f"Multi-speaker transcription, {len(diarize_segments)} segments, duration: {audio_duration:.2f}s")
+                self.logger.info(f"Single speaker transcription completed, duration: {audio_duration:.2f}s")
+            else:
+                # 多说话人处理
+                sentence_segments = asr_result['sentence_info']
+                audio_duration = max(seg['end'] for seg in sentence_segments) / 1000.0
 
-                    # 使用原始音频输入进行说话人识别（避免重复的临时文件创建）
-                    speaker_mapping, auto_registered, voiceprint_samples = await self.voice_print_manager.identify_speakers(
-                        diarize_segments,
-                        audio_input,  # 传递原始输入
-                        threshold=threshold,
-                        auto_register=auto_register_unknown
-                    )
+                # 转换为DataFrame
+                segments_data = []
+                for segment in sentence_segments:
+                    segments_data.append({
+                        'speaker': segment['spk'],
+                        'start': segment['start'] / 1000.0,
+                        'end': segment['end'] / 1000.0,
+                        'text': segment['text']
+                    })
+                diarize_segments = pd.DataFrame(segments_data)
 
-                    auto_registered_speakers = auto_registered
-                    voiceprint_audio_samples = voiceprint_samples
+                self.logger.info(
+                    f"Multi-speaker transcription, {len(diarize_segments)} segments, duration: {audio_duration:.2f}s")
 
-                    # 格式化输出
-                    transcript = self._format_multi_speaker_output(
-                        sentence_segments, speaker_mapping, file_location, file_date, file_time
-                    )
+                # 使用原始音频输入进行说话人识别（避免重复的临时文件创建）
+                speaker_mapping, auto_registered, voiceprint_samples = await self.voice_print_manager.identify_speakers(
+                    diarize_segments,
+                    audio_input,  # 传递原始输入
+                    threshold=threshold,
+                    auto_register=auto_register_unknown
+                )
 
-                # 保存转写结果
-                output_file = self._save_transcript_from_input(audio_input, transcript)
+                auto_registered_speakers = auto_registered
+                voiceprint_audio_samples = voiceprint_samples
 
-                if auto_registered_speakers:
-                    self._log_auto_registered_info(auto_registered_speakers)
+                # 格式化输出
+                transcript = self._format_multi_speaker_output(
+                    sentence_segments, speaker_mapping, file_location, file_date, file_time
+                )
 
-                self.logger.info(f"Transcription completed successfully for: {input_desc}")
+            # 保存转写结果
+            output_file = self._save_transcript_from_input(audio_input, transcript)
 
-                return {
-                    "transcript": transcript,
-                    "auto_registered_speakers": auto_registered_speakers,
-                    "voiceprint_audio_samples": voiceprint_audio_samples,
-                    "audio_duration": audio_duration,
-                    "output_file": output_file
-                }
+            if auto_registered_speakers:
+                self._log_auto_registered_info(auto_registered_speakers)
 
-            except Exception as e:
-                self.logger.error(f"Transcription failed for {input_desc}: {e}")
-                raise
-            finally:
-                # 清理临时文件
-                if is_temp and os.path.exists(audio_file_path):
-                    try:
-                        os.remove(audio_file_path)
-                        self.logger.debug(f"Cleaned up temp file: {audio_file_path}")
-                    except Exception as e:
-                        self.logger.warning(f"Failed to remove temp file {audio_file_path}: {e}")
+            self.logger.info(f"Transcription completed successfully for: {input_desc}")
+
+            return {
+                "transcript": transcript,
+                "auto_registered_speakers": auto_registered_speakers,
+                "voiceprint_audio_samples": voiceprint_audio_samples,
+                "audio_duration": audio_duration,
+                "output_file": output_file
+            }
+
+        except Exception as e:
+            self.logger.error(f"Transcription failed for {input_desc}: {e}")
+            raise
 
     # ==================== 声纹管理方法 ====================
 

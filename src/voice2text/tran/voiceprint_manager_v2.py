@@ -4,253 +4,12 @@
 
 import tempfile
 
-import numpy as np
-from typing import Union, BinaryIO, Optional, Tuple
 
 from voice2text.tran.schema.dto import VoicePrintInfo
 from voice2text.tran.schema.prints import SampleInfo
 from voice2text.tran.vector_base import (
     VectorDatabaseFactory, VectorDBConfig
 )
-
-
-class AudioInputHandler:
-    """音频输入处理器 - 统一处理文件路径和二进制数据"""
-
-    def __init__(self, temp_dir: Optional[str] = None, min_duration: float = 0.1):
-        self.temp_dir = temp_dir or tempfile.gettempdir()
-        self._temp_files = []  # 跟踪临时文件以便清理
-        self.min_duration = min_duration  # 最小音频时长（秒）
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup_temp_files()
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup_temp_files()
-
-    def prepare_audio_input(self,
-                            audio_input: Union[str, bytes, BinaryIO],
-                            target_sr: int = 16000) -> Tuple[str, bool]:
-        """
-        准备音频输入，统一转换为文件路径
-
-        Args:
-            audio_input: 音频输入（文件路径、字节数据或文件对象）
-            target_sr: 目标采样率
-
-        Returns:
-            Tuple[str, bool]: (音频文件路径, 是否为临时文件)
-        """
-        if isinstance(audio_input, str):
-            # 文件路径
-            if not os.path.exists(audio_input):
-                raise FileNotFoundError(f"Audio file not found: {audio_input}")
-            return audio_input, False
-
-        elif isinstance(audio_input, bytes):
-            # 字节数据
-            return self._save_bytes_to_temp_file(audio_input), True
-
-        elif hasattr(audio_input, 'read'):
-            # 文件对象
-            return self._save_file_object_to_temp_file(audio_input), True
-
-        else:
-            raise ValueError(f"Unsupported audio input type: {type(audio_input)}")
-
-    def load_audio_data(self,
-                        audio_input: Union[str, bytes, BinaryIO],
-                        target_sr: int = 16000) -> Tuple[np.ndarray, int]:
-        """
-        直接加载音频数据，不创建临时文件
-
-        Args:
-            audio_input: 音频输入
-            target_sr: 目标采样率
-
-        Returns:
-            Tuple[np.ndarray, int]: (音频数据, 采样率)
-        """
-        if isinstance(audio_input, str):
-            # 文件路径
-            wav, sr = librosa.load(audio_input, sr=target_sr, mono=True)
-            return wav, sr
-
-        elif isinstance(audio_input, bytes):
-            # 字节数据
-            with io.BytesIO(audio_input) as buffer:
-                wav, sr = sf.read(buffer)
-
-                # 验证音频数据有效性
-                if len(wav) == 0:
-                    raise ValueError("Audio data is empty")
-
-                # 检查音频时长是否足够
-                duration = len(wav) / sr
-                if duration < self.min_duration:
-                    raise ValueError(
-                        f"Audio duration ({duration:.3f}s) is too short. Minimum duration: {self.min_duration}s")
-
-                # 安全的重采样
-                if sr != target_sr:
-                    wav = self._safe_resample(wav, sr, target_sr)
-
-                return wav, target_sr
-
-        elif hasattr(audio_input, 'read'):
-            # 文件对象
-            audio_input.seek(0)  # 确保从开头读取
-            wav, sr = sf.read(audio_input)
-
-            # 验证音频数据有效性
-            if len(wav) == 0:
-                raise ValueError("Audio data is empty")
-
-            # 检查音频时长是否足够
-            duration = len(wav) / sr
-            if duration < self.min_duration:
-                raise ValueError(
-                    f"Audio duration ({duration:.3f}s) is too short. Minimum duration: {self.min_duration}s")
-
-            # 安全的重采样
-            if sr != target_sr:
-                wav = self._safe_resample(wav, sr, target_sr)
-
-            return wav, target_sr
-
-        else:
-            raise ValueError(f"Unsupported audio input type: {type(audio_input)}")
-
-    def _safe_resample(self, wav: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-        """
-        安全的重采样函数，处理短音频和边缘情况
-
-        Args:
-            wav: 音频数据
-            orig_sr: 原始采样率
-            target_sr: 目标采样率
-
-        Returns:
-            重采样后的音频数据
-        """
-        if orig_sr == target_sr:
-            return wav
-
-        # 计算最小所需样本数
-        min_samples = max(1, int(0.01 * orig_sr))  # 至少10ms的音频
-
-        if len(wav) < min_samples:
-            # 对于太短的音频，先填充零值
-            padding_needed = min_samples - len(wav)
-            wav = np.pad(wav, (0, padding_needed), mode='constant', constant_values=0)
-            print(f"Warning: Audio too short, padded with {padding_needed} zero samples")
-
-        try:
-            # 使用librosa进行重采样
-            return librosa.resample(wav, orig_sr=orig_sr, target_sr=target_sr)
-        except Exception as e:
-            print(f"Warning: librosa resampling failed: {e}")
-            # 备用方案：简单的线性插值重采样
-            return self._simple_resample(wav, orig_sr, target_sr)
-
-    def _simple_resample(self, wav: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-        """
-        简单的线性插值重采样（备用方案）
-        """
-        if orig_sr == target_sr:
-            return wav
-
-        # 计算重采样比率
-        ratio = target_sr / orig_sr
-        new_length = int(len(wav) * ratio)
-
-        if new_length == 0:
-            new_length = 1
-
-        # 使用线性插值
-        old_indices = np.arange(len(wav))
-        new_indices = np.linspace(0, len(wav) - 1, new_length)
-
-        return np.interp(new_indices, old_indices, wav)
-
-    def _save_bytes_to_temp_file(self, audio_bytes: bytes) -> str:
-        """保存字节数据到临时文件"""
-        if len(audio_bytes) == 0:
-            raise ValueError("Audio bytes data is empty")
-
-        temp_file = os.path.join(
-            self.temp_dir,
-            f"temp_audio_{uuid.uuid4().hex[:8]}.wav"
-        )
-
-        # 检测音频格式并保存
-        try:
-            # 尝试直接作为wav格式读取
-            with io.BytesIO(audio_bytes) as buffer:
-                wav, sr = sf.read(buffer)
-
-                # 验证读取的数据
-                if len(wav) == 0:
-                    raise ValueError("No audio data could be read from bytes")
-
-                sf.write(temp_file, wav, sr)
-        except Exception as e:
-            print(f"Warning: Could not read audio bytes as audio file: {e}")
-            # 如果失败，直接写入字节（假设是有效的音频格式）
-            with open(temp_file, 'wb') as f:
-                f.write(audio_bytes)
-
-        self._temp_files.append(temp_file)
-        return temp_file
-
-    def _save_file_object_to_temp_file(self, file_obj: BinaryIO) -> str:
-        """保存文件对象到临时文件"""
-        temp_file = os.path.join(
-            self.temp_dir,
-            f"temp_audio_{uuid.uuid4().hex[:8]}.wav"
-        )
-
-        file_obj.seek(0)  # 确保从开头读取
-
-        try:
-            # 尝试作为音频文件读取并保存为wav
-            wav, sr = sf.read(file_obj)
-
-            # 验证读取的数据
-            if len(wav) == 0:
-                raise ValueError("No audio data could be read from file object")
-
-            sf.write(temp_file, wav, sr)
-        except Exception as e:
-            print(f"Warning: Could not read file object as audio: {e}")
-            # 如果失败，直接复制字节
-            file_obj.seek(0)
-            content = file_obj.read()
-            if len(content) == 0:
-                raise ValueError("File object is empty")
-
-            with open(temp_file, 'wb') as f:
-                f.write(content)
-
-        self._temp_files.append(temp_file)
-        return temp_file
-
-    def cleanup_temp_files(self):
-        """清理临时文件"""
-        for temp_file in self._temp_files:
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except Exception as e:
-                print(f"Warning: Failed to remove temp file {temp_file}: {e}")
-        self._temp_files.clear()
-
 
 import asyncio
 import io
@@ -556,7 +315,7 @@ class VectorEnhancedVoicePrintManager:
                         speaker_identities[speaker] = new_speaker_id
                         auto_registered_speakers[new_speaker_id] = {
                             'original_id': speaker,
-                            'audio_length': audio_duration,
+                            'audio_length': float(audio_duration),
                             'sample_id': sample_id
                         }
                         voiceprint_audio_samples[new_speaker_id] = sample_id
@@ -865,21 +624,64 @@ class VectorEnhancedVoicePrintManager:
             # 字节数据
             with io.BytesIO(audio_input) as buffer:
                 wav, sr = sf.read(buffer)
+
+                # 检查音频长度
+                if len(wav) == 0:
+                    raise ValueError("Audio data is empty")
+
+                # 转换为单声道（如果是多声道）
+                if wav.ndim > 1:
+                    wav = np.mean(wav, axis=1)  # 取所有声道的平均值
+
+                # 如果需要重采样且音频足够长
                 if sr != target_sr:
-                    wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+                    # 计算最小长度（至少需要几个样本才能安全重采样）
+                    min_samples = max(10, int(0.01 * sr))  # 至少10个样本或10ms的音频
+
+                    if len(wav) < min_samples:
+                        # 对于过短的音频，使用零填充
+                        padded_wav = np.pad(wav, (0, min_samples - len(wav)), mode='constant', constant_values=0)
+                        resampled_wav = librosa.resample(padded_wav, orig_sr=sr, target_sr=target_sr)
+                        # 裁剪到原始长度比例
+                        target_length = max(1, int(len(wav) * target_sr / sr))
+                        wav = resampled_wav[:target_length]
+                    else:
+                        wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+
                 return wav, target_sr
 
         elif hasattr(audio_input, 'read'):
             # 文件对象
             audio_input.seek(0)  # 确保从开头读取
             wav, sr = sf.read(audio_input)
+
+            # 检查音频长度
+            if len(wav) == 0:
+                raise ValueError("Audio data is empty")
+
+            # 转换为单声道（如果是多声道）
+            if wav.ndim > 1:
+                wav = np.mean(wav, axis=1)  # 取所有声道的平均值
+
+            # 如果需要重采样且音频足够长
             if sr != target_sr:
-                wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+                # 计算最小长度
+                min_samples = max(10, int(0.01 * sr))  # 至少10个样本或10ms的音频
+
+                if len(wav) < min_samples:
+                    # 对于过短的音频，使用零填充
+                    padded_wav = np.pad(wav, (0, min_samples - len(wav)), mode='constant', constant_values=0)
+                    resampled_wav = librosa.resample(padded_wav, orig_sr=sr, target_sr=target_sr)
+                    # 裁剪到原始长度比例
+                    target_length = max(1, int(len(wav) * target_sr / sr))
+                    wav = resampled_wav[:target_length]
+                else:
+                    wav = librosa.resample(wav, orig_sr=sr, target_sr=target_sr)
+
             return wav, target_sr
 
         else:
             raise ValueError(f"Unsupported audio input type: {type(audio_input)}")
-
     async def _delete_audio_file(self, file_id: str):
         """删除音频文件"""
         try:
