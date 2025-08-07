@@ -409,7 +409,7 @@ class STTServiceConfig:
     # 语言策略映射 (新增)
     language_model_mapping: Dict[str, str] = field(default_factory=lambda: {
         "auto": "whisper",
-        "zh": "funasr",
+        "zh-CN": "funasr",
         "en": "whisper",
         "ja": "whisper",
         "ko": "whisper"

@@ -314,7 +314,7 @@ class VectorEnhancedVoicePrintManager:
                         )
                         speaker_identities[speaker] = new_speaker_id
                         auto_registered_speakers[new_speaker_id] = {
-                            'original_id': int(speaker),
+                            'original_id': str(speaker),
                             'audio_length': float(audio_duration),
                             'sample_id': sample_id
                         }
