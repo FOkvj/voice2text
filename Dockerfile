@@ -1,12 +1,17 @@
-# 使用 Python 3.11.11 作为基础镜像
-FROM python:3.11.11-slim
+# 使用 NVIDIA CUDA 12.1 作为基础镜像
+ARG BASE_IMAGE="nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04"
+FROM ${BASE_IMAGE}
 
-# 设置工作目录
-WORKDIR /app
+# 设置环境变量
+ENV PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" \
+    UV_TRUSTED_HOST="pypi.tuna.tsinghua.edu.cn"
 
-# 安装系统依赖
+# 安装基本依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     curl \
     git \
     ffmpeg \
@@ -17,24 +22,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -sSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# 复制 pyproject.toml 文件
-COPY pyproject.toml README.md ./
+WORKDIR /app
 
-# 复制源代码
+# 创建虚拟环境
+ENV VIRTUAL_ENV=/app/.venv
+RUN uv venv $VIRTUAL_ENV
+ENV PATH="$VIRTUAL_ENV/bin:$PATH"
+
+# 复制项目文件
+COPY pyproject.toml .env ./
 COPY src ./src
 
-# 使用 uv 安装依赖
-RUN uv pip install -e .
+# 使用 uv sync 安装依赖
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --all-packages \
+    --index-url=$PIP_INDEX_URL \
+    --trusted-host=$UV_TRUSTED_HOST \
+   # 验证python
+    && python -c "import src.voice2text.tran.app; print('Voice2Text app is ready!')"
 
-# 如果有需要，安装开发依赖
-# RUN uv pip install -e ".[dev]"
 
-# 设置环境变量
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-
-# 暴露端口（如果您的应用需要）
-EXPOSE 5000
+# 暴露端口
+EXPOSE 8765
 
 # 设置启动命令
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "src.app:app"]
+CMD ["python", "-m", "src.voice2text.tran.app"]
+
