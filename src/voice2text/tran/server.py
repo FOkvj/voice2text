@@ -5,35 +5,25 @@ import mimetypes
 import os
 import tempfile
 import urllib
-from http.client import HTTPException
-
-from typing import Generic, TypeVar, Optional, Any, Dict, List, Tuple
-from dataclasses import dataclass, field
-from enum import Enum
 from datetime import datetime
-import json
+from http.client import HTTPException
+from pathlib import Path
+from typing import Optional, Dict, Tuple
 
-from voice2text.tran.filesystem import StorageType, S3StorageConfig
+import aiofiles
+from fastapi import FastAPI, File, UploadFile, Query, Path as FastAPIPath
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+
 from voice2text.tran.schema.dto import ServiceStatus, ApiResponse, ResponseCode, FileUploadResult, TranscribeRequest, \
-    TaskInfo, TranscribeResult, VoiceprintRegisterRequest, VoicePrintInfo, SpeakerStatistics
+    TaskInfo, TranscribeResult, VoiceprintRegisterRequest, SpeakerStatistics
 from voice2text.tran.schema.prints import SampleInfo
-from voice2text.tran.speech2text import STTAsyncVoice2TextService, STTConfigFactory, TranscriptionStrategy
+from voice2text.tran.speech2text import STTAsyncVoice2TextService
+
 
 # ============================================================================
 # FastAPI服务端实现
 # ============================================================================
-
-from fastapi import FastAPI, File, UploadFile, Query, Path as FastAPIPath
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-import uuid
-import asyncio
-import aiofiles
-import io
-
-from pathlib import Path
-
-from voice2text.tran.vector_base import VectorDBType, ChromaDBConfig
 
 
 def parse_filename(audio_file_path: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -607,70 +597,3 @@ class VoiceSDKServer:
 
 
 
-async def start_server():
-    import uvicorn
-    # 1. 创建语音服务实例
-    asr_config = STTConfigFactory.create_funasr_config(
-        model_name="paraformer-zh",
-        device="cpu"
-    )
-
-    whisper_config = STTConfigFactory.create_whisper_config(
-        model_name="large-v3-turbo",
-        device="cpu",
-        use_auth_token=os.getenv("HF_TOKEN")  # 需要设置Hugging Face token
-    )
-
-    speaker_config = STTConfigFactory.create_speaker_config(
-        threshold=0.5,
-        device="cpu"
-    )
-
-    vector_db_config = ChromaDBConfig(db_type=VectorDBType.CHROMADB, persist_directory='./voice_vectors', collection_name='voice_prints')
-
-    s3_config = S3StorageConfig(
-        storage_type=StorageType.S3,
-        bucket_name="voice",
-        endpoint_url="http://localhost:9000",
-        access_key_id="admin",
-        secret_access_key="minioadmin123",
-        prefix="stt"
-    )
-
-    # 创建向量服务配置
-    service_config = STTConfigFactory.create_stt_service_config(
-        asr_config=asr_config,
-        whisper_config=whisper_config,
-        speaker_config=speaker_config,
-        vector_db_config=vector_db_config,
-        storage_config=s3_config,
-        transcription_strategy=TranscriptionStrategy.AUTO_SELECT,  # 自动选择策略
-        language_model_mapping={  # 自定义语言映射
-            "auto": "whisper",
-            "zh": "funasr",
-            "en": "whisper",
-            "ja": "whisper"
-        },
-        max_transcribe_concurrent=2,
-        max_speaker_concurrent=3,
-        task_timeout=300.0
-    )
-
-    voice_service = STTAsyncVoice2TextService(service_config)
-    await voice_service.start()
-    # 2. 创建并启动服务器
-    server = VoiceSDKServer(voice_service)
-
-    # 3. 使用uvicorn运行FastAPI应用
-    config = uvicorn.Config(
-        app=server.app,
-        host="0.0.0.0",
-        port=8765,
-        log_level="info"
-    )
-    server = uvicorn.Server(config)
-    await server.serve()
-
-
-if __name__ == "__main__":
-    asyncio.run(start_server())
