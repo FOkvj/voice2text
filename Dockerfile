@@ -10,41 +10,44 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple" \
     UV_TRUSTED_HOST="pypi.tuna.tsinghua.edu.cn"
 
-# 安装基本依赖
+# 安装基本依赖和 Python
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     git \
     ffmpeg \
+    python3 \
+    python3-pip \
+    python3-venv \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 uv
-RUN curl -sSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.cargo/bin:${PATH}"
+# 安装 pipx 并使用它安装 uv
+RUN python3 -m pip install --user pipx \
+    && python3 -m pipx ensurepath \
+    && export PATH="$HOME/.local/bin:$PATH" \
+    && pipx install uv
+
+# 将 pipx 安装的工具路径添加到 PATH
+ENV PATH="/root/.local/bin:${PATH}"
 
 WORKDIR /app
 
 # 创建虚拟环境
 ENV VIRTUAL_ENV=/app/.venv
-RUN uv venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
 # 复制项目文件
-COPY pyproject.toml .env ./
+COPY pyproject.toml README.md uv.lock ./
 COPY src ./src
 
-# 使用 uv sync 安装依赖
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --all-packages \
-    --index-url=$PIP_INDEX_URL \
-    --trusted-host=$UV_TRUSTED_HOST \
-   # 验证python
-    && python -c "import src.voice2text.tran.app; print('Voice2Text app is ready!')"
+# 检查 uv 是否安装成功
+RUN which uv && uv --version
 
+# 使用 uv sync 安装依赖
+RUN uv sync --index-url=$PIP_INDEX_URL
 
 # 暴露端口
 EXPOSE 8765
 
 # 设置启动命令
 CMD ["python", "-m", "src.voice2text.tran.app"]
-
